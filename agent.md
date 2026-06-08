@@ -3,6 +3,9 @@
 Read this in full before changing any code. The roadmap and the list of what to
 build next live in `plan.md` — read it too, work the smallest correct increment
 of the current phase, and tick its checkboxes when a deliverable is finished.
+Detailed per-phase design lives in `docs/phases/`, and the rationale for
+cross-cutting decisions in `docs/decisions/` — see `docs/README.md` for how it
+all fits together, and section 10 below for the upkeep rules you must follow.
 
 > Tooling note: this file is named `agent.md` by request. Some tools auto-load a
 > differently-named file from the repo root — Claude Code reads `CLAUDE.md`,
@@ -182,16 +185,37 @@ test depth to risk.
 
 ## 9. How to work
 
-1. Read `plan.md`; confirm the current phase and task. Do the smallest correct
-   increment.
+1. Read `plan.md`; confirm the current phase and task. Open its design doc in
+   `docs/phases/`; if it is still a stub, **expand it first** (scope, tech
+   decisions, design, milestones, test plan) before writing code.
 2. Stay within the current layer unless the task explicitly spans layers.
-3. Implement, then write or update the tests that cover the change (see the
-   phase's critical tests in `plan.md`).
-4. Run `ctest`. If anything is red, fix it before going further — a task with
-   failing tests is not finished.
-5. Report: what changed, which files, the test results, and an explicit
+3. Implement, then write or update the tests that cover the change (the phase's
+   critical tests are listed in `plan.md`).
+4. Run `ctest`. Red or missing tests means the task is not finished — fix it
+   before continuing.
+5. If you made a cross-cutting decision, record it as an ADR in
+   `docs/decisions/` (from `_TEMPLATE.md`), set its status, and link it from the
+   phase doc and the `plan.md` decisions index.
+6. Report: what changed, which files, the test results, and an explicit
    confirmation that the golden rules still hold.
-6. When something is ambiguous or would violate a rule, ask or flag — don't
+7. When something is ambiguous or would violate a rule, ask or flag — don't
    guess.
-7. Update the status section in `plan.md` only when the deliverable is done by
-   the section 5 definition (tests green included).
+8. When the deliverable is done by the section 5 definition (tests green
+   included), update statuses: the phase-doc header, the `plan.md` Status log,
+   and the module checklist.
+
+## 10. Documentation map & upkeep
+
+Planning and design are split by how often each part changes (full explanation
+in `docs/README.md`):
+
+- `plan.md` — light, scannable roadmap; the source of truth for scope and status.
+- `agent.md` — this file: rules and conventions.
+- `docs/phases/NN-*.md` — per-phase design depth, expanded just-in-time.
+- `docs/decisions/NNNN-*.md` — append-only ADRs capturing the rationale for
+  cross-cutting choices; indexed in `docs/decisions/README.md`.
+
+Upkeep rules: expand a phase's design doc before coding that phase; record
+cross-cutting decisions as ADRs and link them; keep each decision in exactly one
+place (link, never duplicate); and update statuses in the phase doc and `plan.md`
+as work lands.

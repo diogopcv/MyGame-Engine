@@ -4,6 +4,11 @@ The single source of truth for scope, architecture, and what to build next.
 Agents: confirm the current phase here before starting, and update the Status
 log when a deliverable lands. Conventions and hard rules are in `agent.md`.
 
+This file stays high-level on purpose. Per-phase design detail lives in
+`docs/phases/NN-*.md` (linked from each phase below), and the rationale for
+cross-cutting decisions in `docs/decisions/` (ADRs). See `docs/README.md` for how
+the docs fit together and the rules for keeping them current.
+
 ## Vision
 
 A complete, modular, data-oriented game engine in C++20, for Windows, built in
@@ -99,17 +104,24 @@ Application (Layer 5)
 
 ## Key technical decisions
 
-- **Language:** C++20. No exceptions in core/hot paths; minimal RTTI (custom
-  reflection instead of `typeid`/`dynamic_cast`).
-- **Build:** CMake generating a VS solution; one static lib per module; jumbo /
-  unity builds added later for compile time.
-- **Type system mechanism:** annotation macros + a codegen step. Decide the
-  concrete design in Phase 2 before serialization depends on it.
-- **Scripting / iteration:** TBD — Lua vs custom VM vs hot-reloadable C++ DLLs.
-  Decide before the gameplay framework (Phase 4).
-- **Editor:** TBD — engine+editor vs engine-only. Until decided, design the type
-  system *as if* an editor is coming (reflection, serialization, undo, hot
-  reload).
+Decisions with lasting impact are recorded as ADRs in `docs/decisions/` (full
+index in `docs/decisions/README.md`). This list is just the pointer; the
+rationale and consequences live in the records.
+
+Accepted:
+- ADR-0001 — Layered architecture & downward-only dependencies.
+- ADR-0002 — Language, build & toolchain (C++20, CMake → VS, no exceptions in core).
+- ADR-0003 — Testing strategy & framework (tiers + doctest + CTest).
+- ADR-0004 — Memory management (arenas/pools over platform virtual memory).
+- ADR-0005 — Math conventions (handedness, matrix storage, depth range).
+
+Open — decide before the noted phase:
+- ADR-0006 — DX12 descriptor & binding model (Phase 1).
+- ADR-0007 — Reflection / type-system mechanism (Phase 2).
+- ADR-0008 — ECS storage model (Phase 4).
+- ADR-0009 — Scripting / iteration model (Phase 4).
+- Editor scope: engine+editor vs engine-only (open) — until decided, design as
+  if the editor is coming (reflection, serialization, undo, hot-reload).
 
 ## Roadmap
 
@@ -118,6 +130,7 @@ table after the roadmap) to be green. A phase with red or missing tests is not
 done, regardless of how complete the feature looks.
 
 ### Phase 0 — Foundation skeleton  [IN PROGRESS]
+- Detail: [`docs/phases/00-foundation.md`](docs/phases/00-foundation.md)
 - Done: build scaffolding; platform (window, timer, memory); core (types, log,
   assert, arena); fixed-timestep game loop.
 - Remaining: **math library** — vec2/3/4, mat4, quat, transform helpers, and the
@@ -126,6 +139,7 @@ done, regardless of how complete the feature looks.
   timing; math has a smoke test.
 
 ### Phase 1 — First triangle (the DX12 gauntlet)
+- Detail: [`docs/phases/01-dx12-triangle.md`](docs/phases/01-dx12-triangle.md)
 - Device, swapchain, command queue/list/allocators, fences, descriptor heaps,
   root signature, PSO, vertex buffer, draw call.
 - Progression: triangle -> textured quad -> spinning cube driven by an MVP
@@ -133,6 +147,7 @@ done, regardless of how complete the feature looks.
 - DoD: a spinning, textured cube at a stable, vsynced frame rate.
 
 ### Phase 2 — Harden the core
+- Detail: [`docs/phases/02-harden-core.md`](docs/phases/02-harden-core.md)
 - Job/task system; full allocator suite (arena, pool, stack, general-purpose);
   reflection/type system; serialization; resource/handle system; file system
   abstraction; strings.
@@ -141,29 +156,34 @@ done, regardless of how complete the feature looks.
   serialization; the in-engine profiler shows per-frame timings.
 
 ### Phase 3 — Renderer proper
+- Detail: [`docs/phases/03-renderer.md`](docs/phases/03-renderer.md)
 - Clean RHI abstraction; render/frame graph; mesh/material/texture resources;
   model loader (use cgltf/assimp for *import* only); camera; forward or deferred
   lighting; shadows.
 - DoD: load and render a real 3D model with lighting and a fly-through camera.
 
 ### Phase 4 — World & gameplay
+- Detail: [`docs/phases/04-world-gameplay.md`](docs/phases/04-world-gameplay.md)
 - ECS; scene/world management; fixed-update integration; input wired to
   components; scripting/iteration layer.
 - DoD: a controllable entity in a rendered scene.
 
 ### Phase 5 — Physics from scratch
+- Detail: [`docs/phases/05-physics.md`](docs/phases/05-physics.md)
 - Broadphase (sweep-and-prune or BVH) -> narrowphase (GJK/EPA or SAT) -> contact
   manifolds -> constraint solver (sequential impulses) -> integration; CCD
   later. Exposed via rigidbody/collider components.
 - DoD: stacking boxes plus a physics-driven, controllable character.
 
 ### Phase 6 — Animation
+- Detail: [`docs/phases/06-animation.md`](docs/phases/06-animation.md)
 - Skeletal animation with GPU skinning; clip sampling and looping; blend trees;
   animation state machines; root motion; inverse kinematics (later).
 - DoD: a skinned character plays and smoothly blends clips (idle / walk / run)
   driven by gameplay state.
 
 ### Phase 7 — Audio
+- Detail: [`docs/phases/07-audio.md`](docs/phases/07-audio.md)
 - Mixing graph; 3D spatialization and distance attenuation; streaming vs
   in-memory sounds; buses/groups (master / SFX / music); basic DSP (volume,
   pitch, reverb send). Backend from scratch (WASAPI) or via miniaudio.
@@ -171,6 +191,7 @@ done, regardless of how complete the feature looks.
   distance and routed through separate buses.
 
 ### Phase 8 — UI / HUD
+- Detail: [`docs/phases/08-ui-hud.md`](docs/phases/08-ui-hud.md)
 - Batched quad + text/font-atlas rendering; layout; input routing and focus;
   core widgets (panel, button, slider, text input); HUD anchoring. Dear ImGui
   for debug/editor UI; the game UI uses the engine's own system.
@@ -178,6 +199,7 @@ done, regardless of how complete the feature looks.
   overlays.
 
 ### Phase 9 — AI
+- Detail: [`docs/phases/09-ai.md`](docs/phases/09-ai.md)
 - Navmesh generation + A* pathfinding; steering and local avoidance; behavior
   trees and/or state machines; perception (line-of-sight via physics raycasts);
   a blackboard for shared state.
@@ -185,6 +207,7 @@ done, regardless of how complete the feature looks.
   behavior tree.
 
 ### Phase 10 — Networking & multiplayer
+- Detail: [`docs/phases/10-networking.md`](docs/phases/10-networking.md)
 - Transport (reliable + unreliable UDP); connection/session management;
   reflection-driven state replication; snapshot + delta compression;
   client-side prediction and server reconciliation; lag compensation; RPCs.
@@ -194,6 +217,7 @@ done, regardless of how complete the feature looks.
   (Phase 4) — keep both replication-aware as they are built.
 
 ### Phase 11 — Asset pipeline & content cooker (offline)
+- Detail: [`docs/phases/11-pipeline.md`](docs/phases/11-pipeline.md)
 - Robust importers for every content type; an asset build graph with dependency
   tracking and incremental, parallel cooking; conversion to engine-native
   binary; stable asset GUIDs/references; validation. Pairs with the runtime
@@ -202,6 +226,7 @@ done, regardless of how complete the feature looks.
   rebuilding only what changed.
 
 ### Phase 12 — Profiling, debugging & developer tooling
+- Detail: [`docs/phases/12-tooling.md`](docs/phases/12-tooling.md)
 - Grow the lightweight Phase 2 tools into a CPU/GPU profiler with frame capture;
   memory tracking and leak detection; crash reporting/dumps; a mature console +
   CVar/config system; debug draw; and code/asset hot-reload.
@@ -209,6 +234,7 @@ done, regardless of how complete the feature looks.
   inside the engine.
 
 ### Phase 13 — Editor & tools framework
+- Detail: [`docs/phases/13-editor.md`](docs/phases/13-editor.md)
 - Scene editing with transform gizmos; reflection-driven property panels; asset
   browser; undo/redo; play-in-editor; serialization-backed save/load;
   multi-window docking (ImGui).
@@ -216,6 +242,7 @@ done, regardless of how complete the feature looks.
   without leaving the app.
 
 ### Phase 14 — Vertical-slice game & shipping hardening
+- Detail: [`docs/phases/14-vertical-slice.md`](docs/phases/14-vertical-slice.md)
 - Build a small but complete game with the engine as the forcing function;
   optimization passes (CPU, GPU, memory); Release/Shipping build configs;
   packaging and distribution; documentation.
@@ -251,5 +278,7 @@ asserts — that is expected, not a gap.
 ## Status log
 
 - _(set date)_ Phase 0 skeleton committed: platform + core + sandbox loop.
+- _(set date)_ Docs structure added: `docs/phases/` (per-phase design) and
+  `docs/decisions/` (ADRs 0001–0009); plan/agent files point to them.
 - Next up: Phase 0 math library, plus its unit tests and the test harness
   (doctest + CTest) that the project will use from here on.
