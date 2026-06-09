@@ -1,6 +1,6 @@
 # Phase 0 — Foundation skeleton
 
-> Status: In progress (skeleton done; math library remaining)
+> Status: **Complete**
 
 ## Goal
 A buildable engine skeleton: a window that opens, clears to a color, runs a

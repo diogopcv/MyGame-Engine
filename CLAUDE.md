@@ -183,25 +183,18 @@ Run before claiming a task done, and report the answers:
 7. When something is ambiguous or would violate a rule, ask or flag — don't guess.
 8. When the deliverable is done (tests green by the definition above), update statuses: the phase-doc header, the `plan.md` Status log, and the module checklist.
 
-## Current Phase: Phase 0 — Foundation Skeleton
+## Current Phase: Phase 1 — First Triangle (DX12 Gauntlet)
 
-Status: In progress (skeleton done; **math library remaining**).
+Status: Not started.
 
-What's done:
-- Build scaffolding, platform (window, timer, memory), core (types, log, assert, arena), fixed-timestep loop
+Phase 0 is **complete**: math library (vec2/3/4, mat4, quat, transform/projection
+helpers, look-at/perspective), doctest + CTest harness, 41 unit tests all green.
 
-What's remaining:
-- **Math library:** `vec2/3/4`, `mat4`, `quat`, transform/projection helpers, MVP matrix
-- Stand up the test harness (doctest + CTest)
+Phase 1 goal: DX12 device, swapchain, command queue/list/allocators, fences,
+descriptor heaps, root signature, PSO, vertex buffer, draw call — ending with a
+spinning textured cube using the math library's MVP matrix.
 
-Milestones:
-1. Doctest + CTest with one trivial passing test
-2. `vec` types + ops + tests
-3. `mat4` + multiply/transpose/inverse + tests
-4. `quat` + normalize/compose/slerp + to-matrix + tests
-5. Transform + projection/view helpers; MVP round-trip test
-
-See `docs/phases/00-foundation.md` for full design details.
+See `docs/phases/01-dx12-triangle.md` for full design details.
 
 ## Golden Rules (Never Violate)
 

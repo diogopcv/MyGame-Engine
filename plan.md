@@ -129,14 +129,13 @@ Every phase's DoD listed below also requires its **critical tests** (see the
 table after the roadmap) to be green. A phase with red or missing tests is not
 done, regardless of how complete the feature looks.
 
-### Phase 0 — Foundation skeleton  [IN PROGRESS]
+### Phase 0 — Foundation skeleton  [COMPLETE]
 - Detail: [`docs/phases/00-foundation.md`](docs/phases/00-foundation.md)
 - Done: build scaffolding; platform (window, timer, memory); core (types, log,
-  assert, arena); fixed-timestep game loop.
-- Remaining: **math library** — vec2/3/4, mat4, quat, transform helpers, and the
-  MVP-matrix utilities Phase 1 needs.
+  assert, arena); fixed-timestep game loop; math library (vec2/3/4, mat4, quat,
+  transform/projection helpers); doctest + CTest harness (41 tests, all green).
 - DoD: window opens, clears to a color, closes cleanly; stable loop with precise
-  timing; math has a smoke test.
+  timing; all critical math and arena tests pass.
 
 ### Phase 1 — First triangle (the DX12 gauntlet)
 - Detail: [`docs/phases/01-dx12-triangle.md`](docs/phases/01-dx12-triangle.md)
@@ -280,5 +279,6 @@ asserts — that is expected, not a gap.
 - _(set date)_ Phase 0 skeleton committed: platform + core + sandbox loop.
 - _(set date)_ Docs structure added: `docs/phases/` (per-phase design) and
   `docs/decisions/` (ADRs 0001–0009); plan/agent files point to them.
-- Next up: Phase 0 math library, plus its unit tests and the test harness
-  (doctest + CTest) that the project will use from here on.
+- 2026-06-08 Phase 0 complete: math library (vec2/3/4, mat4, quat, transform,
+  perspective/look-at), doctest + CTest harness, 41 unit tests all green.
+- Next up: Phase 1 — First triangle (DX12 gauntlet).

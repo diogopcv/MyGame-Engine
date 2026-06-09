@@ -12,3 +12,5 @@ target_include_directories(ge_core PUBLIC include)
 
 # PUBLIC so anyone linking ge_core also transitively gets ge_platform.
 target_link_libraries(ge_core PUBLIC ge_platform)
+
+add_subdirectory(tests)

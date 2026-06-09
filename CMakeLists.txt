@@ -16,6 +16,21 @@ if (MSVC)
     add_compile_options(/W4 /permissive- /MP)
 endif()
 
+# --- Third-party: doctest (header-only test framework) -----------------------
+# Allow third-party CMake projects that still declare cmake_minimum_required < 3.5
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+
+include(FetchContent)
+FetchContent_Declare(
+    doctest
+    GIT_REPOSITORY https://github.com/doctest/doctest.git
+    GIT_TAG        v2.4.11
+)
+FetchContent_MakeAvailable(doctest)
+
+# --- Testing -----------------------------------------------------------------
+enable_testing()
+
 # --- Modules (built bottom-up; dependencies point downward only) -------------
 add_subdirectory(engine/platform)   # Layer 0 : OS abstraction
 add_subdirectory(engine/core)       # Layer 1 : foundation (depends on platform)
