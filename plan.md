@@ -81,7 +81,8 @@ Resources (Layer 2)
 - [ ] Offline pipeline / cooker (DCC formats -> engine-native binary)
 
 Subsystems (Layer 3)
-- [ ] Graphics: DX12 RHI
+- [x] Graphics: DX12 RHI (Phase 1 minimal slice: device/swapchain, root
+      signature/PSO, depth, constant buffers — render/frame graph still open)
 - [ ] Graphics: render / frame graph
 - [ ] Input
 - [ ] Physics (from scratch)
@@ -114,9 +115,9 @@ Accepted:
 - ADR-0003 — Testing strategy & framework (tiers + doctest + CTest).
 - ADR-0004 — Memory management (arenas/pools over platform virtual memory).
 - ADR-0005 — Math conventions (handedness, matrix storage, depth range).
+- ADR-0006 — DX12 descriptor & binding model (classic root signature for now).
 
 Open — decide before the noted phase:
-- ADR-0006 — DX12 descriptor & binding model (Phase 1).
 - ADR-0007 — Reflection / type-system mechanism (Phase 2).
 - ADR-0008 — ECS storage model (Phase 4).
 - ADR-0009 — Scripting / iteration model (Phase 4).
@@ -137,7 +138,7 @@ done, regardless of how complete the feature looks.
 - DoD: window opens, clears to a color, closes cleanly; stable loop with precise
   timing; all critical math and arena tests pass.
 
-### Phase 1 — First triangle (the DX12 gauntlet)
+### Phase 1 — First triangle (the DX12 gauntlet)  [COMPLETE]
 - Detail: [`docs/phases/01-dx12-triangle.md`](docs/phases/01-dx12-triangle.md)
 - Device, swapchain, command queue/list/allocators, fences, descriptor heaps,
   root signature, PSO, vertex buffer, draw call.
@@ -281,4 +282,28 @@ asserts — that is expected, not a gap.
   `docs/decisions/` (ADRs 0001–0009); plan/agent files point to them.
 - 2026-06-08 Phase 0 complete: math library (vec2/3/4, mat4, quat, transform,
   perspective/look-at), doctest + CTest harness, 41 unit tests all green.
-- Next up: Phase 1 — First triangle (DX12 gauntlet).
+- 2026-06-09 Phase 1 Milestone 1 done: `ge_gfx` module (DX12 device, command
+  queue, flip-model swapchain, RTV heap, fence sync, double buffering),
+  sandbox clears to a color every frame, smoke test (60 frames, zero debug-
+  layer errors) green. ADR-0006 accepted (classic root signature).
+- 2026-06-09 Phase 1 Milestone 2 done: first triangle. HLSL shaders compiled
+  offline via DXC (CMake custom command), empty root signature, PSO with a
+  position+color input layout, upload-heap vertex buffer, drawn every frame.
+  Smoke test green (60 frames, zero debug-layer errors).
+- 2026-06-09 Phase 1 Milestone 3 done: textured quad. Root signature extended
+  with a one-SRV descriptor table + static sampler; quad as vertex+index
+  buffers; procedural 4x4 checkerboard texture uploaded to a default-heap
+  resource via an upload-heap staging buffer and SRV in a shader-visible
+  heap. Smoke test green (60 frames, zero debug-layer errors).
+- 2026-06-09 Phase 1 Milestone 4 done (Phase 1 complete): spinning textured
+  cube. Root signature gained a root CBV (b0, vertex-visible) backing
+  per-frame MVP constant buffers; cube geometry (24 verts/36 indices) reuses
+  the checkerboard texture; D32_FLOAT depth buffer with depth test/write in
+  the PSO; `cube_{vs,ps}.hlsl` apply `mvp = model(t) * view * proj`.
+  `Renderer::begin_frame(dt)` drives the spin; `capture_back_buffer()` +
+  vendored stb_image/stb_image_write back a new golden-image CTest (90
+  frames @ fixed dt vs. `engine/gfx/tests/golden/cube.png`). Smoke + golden
+  tests green, zero debug-layer errors.
+- Next up: Phase 2 — Harden the core (job/task system, allocator suite,
+  reflection/serialization, resource/handle system, file system, strings;
+  lightweight profiler/debug-draw/CVar console).

@@ -3,6 +3,7 @@
 #include "core/arena.h"
 #include "platform/window.h"
 #include "platform/timer.h"
+#include "gfx/renderer.h"
 
 int main() {
     using namespace ge;
@@ -27,6 +28,23 @@ int main() {
     }
     GE_INFO("Window created ({}x{})", window.width(), window.height());
 
+    ge::gfx::Renderer renderer;
+    ge::gfx::RendererDesc renderer_desc{};
+    renderer_desc.hwnd   = window.native_handle();
+    renderer_desc.width  = window.width();
+    renderer_desc.height = window.height();
+#ifdef _DEBUG
+    renderer_desc.enable_debug_layer = true;
+#else
+    renderer_desc.enable_debug_layer = false;
+#endif
+    if (!renderer.init(renderer_desc)) {
+        GE_ERROR("Failed to initialize the DX12 renderer");
+        window.destroy();
+        return 1;
+    }
+    renderer.set_clear_color(0.05f, 0.1f, 0.2f, 1.0f);
+
     // --- The game loop -------------------------------------------------------
     // Fixed-timestep simulation decoupled from a variable-rate render. The
     // accumulator pattern keeps physics/gameplay deterministic regardless of
@@ -49,6 +67,7 @@ int main() {
         accumulator += frame_time;
 
         window.pump_events();
+        renderer.resize(window.width(), window.height());
 
         while (accumulator >= fixed_dt) {
             // Fixed simulation step. Gameplay and physics will live here.
@@ -56,9 +75,9 @@ int main() {
         }
 
         // const f64 alpha = accumulator / fixed_dt; // render interpolation (Phase 4+)
-        //
-        // Render goes here. In Phase 1 this becomes a DX12 clear + present.
-        // For now the window's background brush is our visible "clear".
+
+        renderer.begin_frame(static_cast<float>(frame_time));
+        renderer.end_frame();
 
         ++frames;
         fps_timer += frame_time;
@@ -70,6 +89,7 @@ int main() {
     }
 
     GE_INFO("Shutting down ...");
+    renderer.shutdown();
     window.destroy();
     perm.shutdown();
     GE_INFO("Clean exit.");

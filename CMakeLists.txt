@@ -31,7 +31,11 @@ FetchContent_MakeAvailable(doctest)
 # --- Testing -----------------------------------------------------------------
 enable_testing()
 
+# --- Third-party: stb_image / stb_image_write (golden-image test) -----------
+add_subdirectory(third_party/stb)
+
 # --- Modules (built bottom-up; dependencies point downward only) -------------
 add_subdirectory(engine/platform)   # Layer 0 : OS abstraction
 add_subdirectory(engine/core)       # Layer 1 : foundation (depends on platform)
-add_subdirectory(sandbox)           # Layer 5 : the application (depends on core)
+add_subdirectory(engine/gfx)        # Layer 3 : graphics subsystem (DX12 RHI)
+add_subdirectory(sandbox)           # Layer 5 : the application (depends on core, gfx)
