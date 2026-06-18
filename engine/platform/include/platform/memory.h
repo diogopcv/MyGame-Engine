@@ -1,18 +1,34 @@
 #pragma once
 #include <cstddef>
 
-// Raw virtual-memory services. Note we use only standard types here
-// (std::size_t) so the platform layer has zero dependency on core.
+/**
+ * @file memory.h
+ * @brief Raw virtual-memory services (Layer 0 — Platform).
+ *
+ * Uses only standard types (`std::size_t`) so the platform layer has zero
+ * dependency on core.  Backed by `VirtualAlloc` / `VirtualFree` on Windows.
+ */
 namespace ge::platform {
 
-// Reserve + commit a block of zero-initialized memory.
+/**
+ * @brief Reserve and commit a block of zero-initialized virtual memory.
+ * @param size Number of bytes to allocate.
+ * @return Pointer to the allocated block, or `nullptr` on failure.
+ */
 void* mem_alloc(std::size_t size);
 
-// Release a block previously returned by mem_alloc. `size` is currently
-// unused on Windows but kept in the signature for portability.
+/**
+ * @brief Release a block previously returned by mem_alloc().
+ * @param ptr  Pointer returned by mem_alloc().
+ * @param size Size passed to the original mem_alloc() call.
+ *             Currently unused on Windows but kept for portability.
+ */
 void  mem_free(void* ptr, std::size_t size);
 
-// OS page size in bytes (useful for arenas that commit on demand later).
+/**
+ * @brief Query the OS page size in bytes.
+ * @return Page size (e.g. 4096 on most x86-64 systems).
+ */
 std::size_t page_size();
 
 } // namespace ge::platform

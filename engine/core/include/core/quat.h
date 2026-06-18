@@ -2,28 +2,49 @@
 #include "core/mat4.h"
 #include <cmath>
 
+/**
+ * @file quat.h
+ * @brief Unit quaternion type for 3D rotations (Layer 1 — Core).
+ *
+ * The canonical rotation representation per ADR-0005. Quaternion layout is
+ * `(x, y, z, w)` where `w` is the scalar part.
+ */
 namespace ge {
 
-// Unit quaternion: q = (x, y, z, w) where w is the scalar part.
-// The canonical rotation representation per ADR-0005.
+/**
+ * @brief Unit quaternion representing a 3D rotation.
+ *
+ * Layout: `q = (x, y, z, w)` where `w` is the scalar (real) part.
+ * Default-constructed to identity (no rotation).
+ */
 struct quat { f32 x = 0, y = 0, z = 0, w = 1; };
 
+/** @brief Return the identity quaternion (no rotation). */
 inline quat quat_identity() { return {0, 0, 0, 1}; }
 
-// Builds a rotation quaternion from a unit axis and an angle in radians.
+/**
+ * @brief Build a rotation quaternion from an axis and angle.
+ * @param axis  Unit-length rotation axis.
+ * @param angle Rotation angle in radians.
+ */
 inline quat quat_from_axis_angle(vec3 axis, f32 angle) {
     f32 s = std::sin(angle * 0.5f);
     return {axis.x * s, axis.y * s, axis.z * s, std::cos(angle * 0.5f)};
 }
 
+/** @brief Squared length of a quaternion. */
 inline f32  length_sq(quat q) { return q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w; }
+/** @brief Length (norm) of a quaternion. */
 inline f32  length(quat q)    { return std::sqrt(length_sq(q)); }
+/** @brief Normalize a quaternion to unit length. */
 inline quat normalize(quat q) {
     f32 inv = 1.0f / length(q);
     return {q.x*inv, q.y*inv, q.z*inv, q.w*inv};
 }
 
-// Hamilton product: apply p first, then q (left-to-right composition).
+/**
+ * @brief Hamilton product: apply @p p first, then @p q (left-to-right composition).
+ */
 inline quat operator*(quat p, quat q) {
     return {
         p.w*q.x + p.x*q.w + p.y*q.z - p.z*q.y,
@@ -33,7 +54,16 @@ inline quat operator*(quat p, quat q) {
     };
 }
 
-// Spherical linear interpolation; always takes the shorter arc.
+/**
+ * @brief Spherical linear interpolation between two quaternions.
+ *
+ * Always takes the shorter arc. Falls back to normalized lerp when the
+ * quaternions are nearly parallel.
+ *
+ * @param q1 Start quaternion (t = 0).
+ * @param q2 End quaternion   (t = 1).
+ * @param t  Interpolation parameter in [0, 1].
+ */
 inline quat slerp(quat q1, quat q2, f32 t) {
     f32 d = q1.x*q2.x + q1.y*q2.y + q1.z*q2.z + q1.w*q2.w;
     if (d < 0.0f) { q2 = {-q2.x, -q2.y, -q2.z, -q2.w}; d = -d; }
@@ -50,7 +80,10 @@ inline quat slerp(quat q1, quat q2, f32 t) {
             s1*q1.z + s2*q2.z, s1*q1.w + s2*q2.w};
 }
 
-// Converts a unit quaternion to a 4x4 rotation matrix (row-vector convention).
+/**
+ * @brief Convert a unit quaternion to a 4x4 rotation matrix (row-vector convention).
+ * @param q Unit quaternion.
+ */
 inline mat4 quat_to_matrix(quat q) {
     f32 x2 = q.x*q.x, y2 = q.y*q.y, z2 = q.z*q.z;
     f32 xy = q.x*q.y, xz = q.x*q.z, yz = q.y*q.z;
@@ -63,8 +96,14 @@ inline mat4 quat_to_matrix(quat q) {
     return r;
 }
 
-// Recovers a unit quaternion from a rotation matrix (row-vector convention).
-// Uses Shepperd's method to pick the numerically largest component first.
+/**
+ * @brief Recover a unit quaternion from a rotation matrix (row-vector convention).
+ *
+ * Uses Shepperd's method to pick the numerically largest component first,
+ * avoiding division-by-zero for degenerate rotations.
+ *
+ * @param m 4x4 matrix whose upper-left 3x3 is a pure rotation.
+ */
 inline quat quat_from_matrix(const mat4& m) {
     quat q{};
     f32 trace = m.m[0][0] + m.m[1][1] + m.m[2][2];

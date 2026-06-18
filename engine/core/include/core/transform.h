@@ -1,21 +1,43 @@
 #pragma once
 #include "core/quat.h"
 
+/**
+ * @file transform.h
+ * @brief TRS (Translation-Rotation-Scale) composition and decomposition (Layer 1 — Core).
+ */
 namespace ge {
 
-// Compose a TRS matrix (row-vector convention: p' = p * S * R * T).
-// Transforms are applied left-to-right: scale, then rotate, then translate.
+/**
+ * @brief Compose a TRS matrix (row-vector: `p' = p * S * R * T`).
+ *
+ * Transforms are applied left-to-right: scale, then rotate, then translate.
+ *
+ * @param translation World-space position.
+ * @param rotation    Orientation as a unit quaternion.
+ * @param scale       Non-uniform scale factors.
+ * @return Combined 4x4 transformation matrix.
+ */
 inline mat4 trs(vec3 translation, quat rotation, vec3 scale) {
     return mat4_scale(scale) * quat_to_matrix(rotation) * mat4_translation(translation);
 }
 
+/**
+ * @brief Decomposed Translation-Rotation-Scale components.
+ */
 struct trs_components {
-    vec3 translation;
-    quat rotation;
-    vec3 scale;
+    vec3 translation; ///< World-space position.
+    quat rotation;    ///< Orientation quaternion.
+    vec3 scale;       ///< Non-uniform scale factors.
 };
 
-// Decompose a TRS matrix into its components. Assumes no shear or projection.
+/**
+ * @brief Decompose a TRS matrix into its components.
+ *
+ * Assumes the matrix contains no shear or projection.
+ *
+ * @param m 4x4 TRS matrix.
+ * @return Decomposed translation, rotation, and scale.
+ */
 inline trs_components trs_decompose(const mat4& m) {
     trs_components out{};
 

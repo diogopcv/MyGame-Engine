@@ -312,5 +312,8 @@ asserts — that is expected, not a gap.
   + HandleTable with generation tracking), profiler (GE_PROFILE_SCOPE macro,
   ring buffer), CVar system. 109 core + 4 platform tests, all green. Profiler
   wired into sandbox main loop with per-frame timing output.
+- 2026-06-17 Doxygen API documentation added to all 26 public header files
+  across platform (4), core (17), and gfx (1) modules plus the 4 remaining
+  core math headers. Build clean, all tests green.
 - Next up: Phase 3 — Renderer proper (RHI abstraction, render/frame graph,
   mesh/material/texture resources, model loading, camera, lighting, shadows).

@@ -4,21 +4,52 @@
 #include "core/assert.h"
 #include <new>
 
+/**
+ * @file handle.h
+ * @brief Generational handle and handle table (Layer 1 — Core).
+ *
+ * Provides a type-safe, generation-checked indirection layer for resources.
+ * A Handle stores an index and a generation counter; the HandleTable
+ * validates both on every access, catching use-after-free at runtime.
+ */
 namespace ge {
 
+/**
+ * @brief Generational handle — a lightweight, type-safe resource identifier.
+ * @tparam Tag Phantom type used to prevent accidental cross-table usage.
+ *
+ * A handle becomes invalid when the resource it refers to is removed: the
+ * table increments the slot's generation, so stale handles fail the
+ * generation check in HandleTable::get().
+ */
 template <typename Tag>
 struct Handle {
-    u32 index      = ~u32(0);
-    u32 generation = 0;
+    u32 index      = ~u32(0); ///< Slot index (invalid sentinel = ~0).
+    u32 generation = 0;       ///< Generation counter for use-after-free detection.
 
+    /** @brief Check whether this handle was ever assigned a valid slot. */
     bool is_valid() const { return index != ~u32(0); }
     bool operator==(Handle o) const { return index == o.index && generation == o.generation; }
     bool operator!=(Handle o) const { return !(*this == o); }
 };
 
+/**
+ * @brief Flat array of slots accessed through generational Handles.
+ * @tparam T   Stored element type.
+ * @tparam Tag Phantom type tag for the Handle (defaults to T).
+ *
+ * Internally maintains a free list of recycled slot indices.  Each slot
+ * carries a generation counter that is bumped on removal, invalidating any
+ * outstanding handles.
+ */
 template <typename T, typename Tag = T>
 class HandleTable {
 public:
+    /**
+     * @brief Allocate the slot array and free list.
+     * @param capacity Maximum number of live entries.
+     * @param alloc    Allocator for slot and free-list storage.
+     */
     void init(u32 capacity, Allocator alloc) {
         alloc_      = alloc;
         capacity_   = capacity;
@@ -35,6 +66,7 @@ public:
         }
     }
 
+    /** @brief Destroy all live entries and release storage. */
     void shutdown() {
         for (u32 i = 0; i < capacity_; ++i) {
             if (slots_[i].alive)
@@ -49,6 +81,11 @@ public:
         free_count_= 0;
     }
 
+    /**
+     * @brief Insert an item and return a handle to it.
+     * @param item Value to copy into the next free slot.
+     * @return Handle referencing the new entry.  Asserts if the table is full.
+     */
     Handle<Tag> add(const T& item) {
         GE_ASSERT(free_count_ > 0);
         u32 idx = free_list_[--free_count_];
@@ -58,6 +95,10 @@ public:
         return { idx, slots_[idx].generation };
     }
 
+    /**
+     * @brief Remove an entry and invalidate its handle.
+     * @param h Handle to the entry.  Asserts if invalid or generation mismatch.
+     */
     void remove(Handle<Tag> h) {
         GE_ASSERT(h.is_valid());
         GE_ASSERT(h.index < capacity_);
@@ -70,6 +111,12 @@ public:
         --count_;
     }
 
+    /**
+     * @brief Look up an entry by handle.
+     * @param h Handle to the entry.
+     * @return Pointer to the stored value, or `nullptr` if the handle is
+     *         invalid or refers to a removed entry (generation mismatch).
+     */
     T* get(Handle<Tag> h) {
         if (!h.is_valid() || h.index >= capacity_) return nullptr;
         Slot& s = slots_[h.index];
@@ -77,11 +124,14 @@ public:
         return &s.data;
     }
 
+    /** @copydoc get(Handle<Tag>) */
     const T* get(Handle<Tag> h) const {
         return const_cast<HandleTable*>(this)->get(h);
     }
 
+    /** @brief Number of live entries. */
     u32 count()    const { return count_; }
+    /** @brief Maximum number of entries the table was initialised with. */
     u32 capacity() const { return capacity_; }
 
 private:

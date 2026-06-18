@@ -2,16 +2,29 @@
 #include "core/vec.h"
 #include <cmath>
 
+/**
+ * @file mat4.h
+ * @brief 4x4 matrix type with row-major storage (Layer 1 — Core).
+ *
+ * Row-vector convention: transform a point as `p' = p * M`.
+ * Composite transforms read left-to-right: `p' = p * S * R * T`.
+ */
 namespace ge {
 
-// 4x4 matrix, row-major storage: m[row][col].
-// Row-vector convention: transform a point as p' = p * M.
-// Composite transforms read left-to-right:  p' = p * S * R * T.
+/**
+ * @brief 4x4 matrix, row-major storage.
+ *
+ * Element access: `m[row][col]`.  Uses the row-vector convention — points
+ * are transformed as `p' = p * M`, and composite transforms read
+ * left-to-right.
+ */
 struct mat4 {
-    f32 m[4][4];
+    f32 m[4][4]; ///< Row-major matrix elements: `m[row][col]`.
 };
 
-// Multiply: result[i][j] = sum_k A[i][k] * B[k][j]
+/**
+ * @brief Matrix multiplication: `result[i][j] = sum_k A[i][k] * B[k][j]`.
+ */
 inline mat4 operator*(const mat4& a, const mat4& b) {
     mat4 r{};
     for (int i = 0; i < 4; ++i)
@@ -21,7 +34,7 @@ inline mat4 operator*(const mat4& a, const mat4& b) {
     return r;
 }
 
-// Row-vector transform: result[j] = sum_i v[i] * M[i][j]
+/** @brief Row-vector transform: `result[j] = sum_i v[i] * M[i][j]`. */
 inline vec4 operator*(vec4 v, const mat4& M) {
     return {
         v.x*M.m[0][0] + v.y*M.m[1][0] + v.z*M.m[2][0] + v.w*M.m[3][0],
@@ -31,12 +44,14 @@ inline vec4 operator*(vec4 v, const mat4& M) {
     };
 }
 
+/** @brief Construct a 4x4 identity matrix. */
 inline mat4 mat4_identity() {
     mat4 r{};
     r.m[0][0] = r.m[1][1] = r.m[2][2] = r.m[3][3] = 1.0f;
     return r;
 }
 
+/** @brief Transpose a 4x4 matrix. */
 inline mat4 transpose(const mat4& a) {
     mat4 r{};
     for (int i = 0; i < 4; ++i)
@@ -45,7 +60,11 @@ inline mat4 transpose(const mat4& a) {
     return r;
 }
 
-// General 4x4 inverse via cofactor expansion (Cramer's rule).
+/**
+ * @brief Compute the inverse of a 4x4 matrix via cofactor expansion (Cramer's rule).
+ * @param a Matrix to invert (must be non-singular).
+ * @return Inverse matrix.
+ */
 inline mat4 inverse(const mat4& a) {
     const auto& m = a.m;
 
@@ -91,21 +110,30 @@ inline mat4 inverse(const mat4& a) {
     return r;
 }
 
-// Translation in the last row (row-vector: p' = p * T)
+/**
+ * @brief Build a translation matrix (row-vector: `p' = p * T`).
+ * @param t Translation vector.
+ */
 inline mat4 mat4_translation(vec3 t) {
     mat4 r = mat4_identity();
     r.m[3][0] = t.x; r.m[3][1] = t.y; r.m[3][2] = t.z;
     return r;
 }
 
+/**
+ * @brief Build a non-uniform scale matrix.
+ * @param s Scale factors per axis.
+ */
 inline mat4 mat4_scale(vec3 s) {
     mat4 r{};
     r.m[0][0] = s.x; r.m[1][1] = s.y; r.m[2][2] = s.z; r.m[3][3] = 1.0f;
     return r;
 }
 
-// Row-vector rotation matrices (transpose of the column-vector formulas).
-// Positive angles rotate clockwise when looking along the positive axis (LH).
+/**
+ * @brief Build a rotation matrix around the X axis (row-vector, left-handed).
+ * @param angle Rotation in radians. Positive = clockwise looking along +X.
+ */
 inline mat4 mat4_rotation_x(f32 angle) {
     f32 c = std::cos(angle), s = std::sin(angle);
     mat4 r = mat4_identity();
@@ -114,6 +142,10 @@ inline mat4 mat4_rotation_x(f32 angle) {
     return r;
 }
 
+/**
+ * @brief Build a rotation matrix around the Y axis (row-vector, left-handed).
+ * @param angle Rotation in radians. Positive = clockwise looking along +Y.
+ */
 inline mat4 mat4_rotation_y(f32 angle) {
     f32 c = std::cos(angle), s = std::sin(angle);
     mat4 r = mat4_identity();
@@ -122,6 +154,10 @@ inline mat4 mat4_rotation_y(f32 angle) {
     return r;
 }
 
+/**
+ * @brief Build a rotation matrix around the Z axis (row-vector, left-handed).
+ * @param angle Rotation in radians. Positive = clockwise looking along +Z.
+ */
 inline mat4 mat4_rotation_z(f32 angle) {
     f32 c = std::cos(angle), s = std::sin(angle);
     mat4 r = mat4_identity();
@@ -130,9 +166,13 @@ inline mat4 mat4_rotation_z(f32 angle) {
     return r;
 }
 
-// Left-handed perspective projection, [0,1] depth range, row-vector convention.
-//   fov_y:  vertical field of view in radians
-//   aspect: width / height
+/**
+ * @brief Left-handed perspective projection matrix ([0,1] depth, row-vector).
+ * @param fov_y  Vertical field of view in radians.
+ * @param aspect Width / height ratio.
+ * @param near_z Distance to the near clip plane (> 0).
+ * @param far_z  Distance to the far clip plane (> near_z).
+ */
 inline mat4 mat4_perspective_lh(f32 fov_y, f32 aspect, f32 near_z, f32 far_z) {
     f32 cot_y = 1.0f / std::tan(fov_y * 0.5f);
     mat4 r{};
@@ -144,7 +184,12 @@ inline mat4 mat4_perspective_lh(f32 fov_y, f32 aspect, f32 near_z, f32 far_z) {
     return r;
 }
 
-// Left-handed look-at view matrix, row-vector convention.
+/**
+ * @brief Left-handed look-at view matrix (row-vector convention).
+ * @param eye    Camera position in world space.
+ * @param target Point the camera looks at.
+ * @param up     World-up direction (typically `{0,1,0}`).
+ */
 inline mat4 mat4_look_at_lh(vec3 eye, vec3 target, vec3 up) {
     vec3 f = normalize(target - eye);   // forward  (+Z in LH)
     vec3 r = normalize(cross(up, f));   // right    (+X)

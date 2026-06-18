@@ -122,6 +122,7 @@ Strict downward-only: modules depend only on layers below them, siblings never d
 - **Logging:** `GE_TRACE/INFO/WARN/ERROR("fmt {}", args)` (backed by `std::format`, checked at compile time). Never call from platform.
 - **Asserts:** `GE_ASSERT(cond)` for invariants; validate inputs at module boundaries
 - **Errors:** Prefer return values (`bool`, status enum, `std::optional`, `std::expected`) over exceptions
+- **API docs:** Public headers use Doxygen-style `/** */` comments (`@file`, `@brief`, `@param`, `@return`, `@tparam`). Use `///` for inline member annotations. Keep docs on declarations only (not definitions in .cpp).
 
 ## Adding Code
 
@@ -228,9 +229,13 @@ Vendor third-party code under `third_party/` and wrap each behind an engine inte
 - `docs/phases/NN-*.md` — per-phase design depth (expanded just-in-time)
 - `docs/decisions/NNNN-*.md` — Architecture Decision Records (ADRs) capturing rationale
 - `docs/decisions/README.md` — index of all ADRs
+- **API reference** — all public headers carry Doxygen `/** */` documentation
+  (`@file`, `@brief`, `@param`, `@return`, `@tparam`).  Run `doxygen` from the
+  repo root (once a Doxyfile is added) to generate HTML/XML output.
 
 Upkeep rules:
 - Expand a phase's design doc before coding that phase
 - Record cross-cutting decisions as ADRs and link them
 - Keep each decision in exactly one place (link, never duplicate)
 - Update statuses in phase docs and `plan.md` as work lands
+- When adding or changing a public API, update its Doxygen comment in the header
