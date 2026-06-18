@@ -61,6 +61,11 @@ public:
      * @param jobs  Pointer to the first JobDecl.
      * @param count Number of jobs to submit.
      * @return Pointer to a counter that reaches 0 when all jobs finish.
+     *
+     * The returned counter is owned by the system and stays valid until a
+     * wait_for_counter() call with `target == 0` recycles it.  Counters are
+     * pooled but never reused while outstanding, so pointers from distinct
+     * in-flight batches never alias.
      */
     JobCounter* kick_jobs(const JobDecl* jobs, u32 count);
 
@@ -68,6 +73,10 @@ public:
      * @brief Block the calling thread until @p counter reaches @p target.
      * @param counter Counter returned by kick_jobs().
      * @param target  Value to wait for (default 0 = all jobs done).
+     *
+     * When @p target is 0 the drained counter is recycled into the pool; the
+     * caller must not touch @p counter after such a call returns.  A non-zero
+     * @p target leaves the counter outstanding and valid.
      */
     void wait_for_counter(JobCounter* counter, u32 target = 0);
 

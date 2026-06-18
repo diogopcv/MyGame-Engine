@@ -8,10 +8,6 @@
 
 namespace ge {
 
-namespace {
-    constexpr u32 kMaxCounters = 256;
-}
-
 struct JobEntry {
     JobDecl    decl;
     JobCounter* counter;
@@ -24,14 +20,36 @@ struct JobSystemImpl {
     std::condition_variable     cv;
     bool                        shutting_down = false;
 
-    JobCounter                  counters[kMaxCounters];
-    std::atomic<u32>            next_counter{0};
+    // Counter pool. Each JobCounter is heap-allocated individually so its
+    // address is stable for the counter's whole lifetime — workers and waiters
+    // hold raw pointers into it. Counters are recycled only via the free list,
+    // never reconstructed while outstanding, so distinct live batches can never
+    // alias. `all` owns every block for teardown; `free` holds reusable ones
+    // (each returned with value 0). Guarded by counter_mutex.
+    std::mutex                  counter_mutex;
+    std::vector<JobCounter*>    all;
+    std::vector<JobCounter*>    free;
+
+    // Completion signalling. Workers notify done_cv after each decrement;
+    // wait_for_counter() sleeps on it instead of spinning.
+    std::mutex                  done_mutex;
+    std::condition_variable     done_cv;
 
     JobCounter* alloc_counter() {
-        u32 idx = next_counter.fetch_add(1, std::memory_order_relaxed) % kMaxCounters;
-        counters[idx].~JobCounter();
-        new (&counters[idx]) JobCounter();
-        return &counters[idx];
+        std::lock_guard lock(counter_mutex);
+        if (!free.empty()) {
+            JobCounter* c = free.back();
+            free.pop_back();
+            return c; // already at 0 when it was freed
+        }
+        JobCounter* c = new JobCounter();
+        all.push_back(c);
+        return c;
+    }
+
+    void free_counter(JobCounter* c) {
+        std::lock_guard lock(counter_mutex);
+        free.push_back(c);
     }
 
     static void worker_thread(JobSystemImpl* impl) {
@@ -48,6 +66,14 @@ struct JobSystemImpl {
             }
             entry.decl.fn(entry.decl.data);
             entry.counter->decrement();
+
+            // Wake any waiters. Taking done_mutex briefly closes the race
+            // between a waiter testing its predicate and going to sleep inside
+            // done_cv.wait(), so a completion can never be missed.
+            {
+                std::lock_guard<std::mutex> lock(impl->done_mutex);
+            }
+            impl->done_cv.notify_all();
         }
     }
 };
@@ -76,6 +102,7 @@ void JobSystem::shutdown() {
     }
     impl->cv.notify_all();
     for (auto& t : impl->workers) t.join();
+    for (JobCounter* c : impl->all) delete c;
     delete impl;
     impl_ = nullptr;
     worker_count_ = 0;
@@ -95,8 +122,17 @@ JobCounter* JobSystem::kick_jobs(const JobDecl* jobs, u32 count) {
 }
 
 void JobSystem::wait_for_counter(JobCounter* counter, u32 target) {
-    while (counter->value() != target)
-        std::this_thread::yield();
+    auto* impl = static_cast<JobSystemImpl*>(impl_);
+    {
+        std::unique_lock<std::mutex> lock(impl->done_mutex);
+        impl->done_cv.wait(lock, [&] { return counter->value() == target; });
+    }
+    // A fully-drained counter (value 0) is done with: recycle it. The pointer
+    // is invalid for the caller after this returns. Partial waits (target != 0)
+    // leave the counter outstanding and keep it allocated.
+    if (target == 0) {
+        impl->free_counter(counter);
+    }
 }
 
 } // namespace ge

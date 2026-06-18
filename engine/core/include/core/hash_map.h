@@ -93,21 +93,32 @@ public:
      * @param value Value to associate with @p key.
      */
     void set(const K& key, const V& value) {
-        if (count_ * 4 >= capacity_ * 3) grow();
+        // Grow on live + tombstone load so a probe chain always ends in an
+        // empty slot (bounds probe length and prevents an all-occupied table).
+        if ((count_ + tombstones_) * 4 >= capacity_ * 3) grow();
 
         u64 h = detail::hash_key(key);
         usize idx = static_cast<usize>(h) & (capacity_ - 1);
 
+        // Remember the first tombstone we pass, but keep probing for an
+        // existing entry: the key may live further down the chain. Inserting
+        // at the tombstone before confirming absence would create a duplicate.
+        constexpr usize kNoSlot = static_cast<usize>(-1);
+        usize tombstone = kNoSlot;
+
         while (true) {
-            if (slots_[idx].state == State::kEmpty ||
-                slots_[idx].state == State::kDeleted) {
-                new (&slots_[idx].key) K(key);
-                new (&slots_[idx].value) V(value);
-                slots_[idx].state = State::kOccupied;
+            if (slots_[idx].state == State::kEmpty) {
+                usize target = (tombstone != kNoSlot) ? tombstone : idx;
+                new (&slots_[target].key) K(key);
+                new (&slots_[target].value) V(value);
+                slots_[target].state = State::kOccupied;
+                if (target == tombstone) --tombstones_;
                 ++count_;
                 return;
             }
-            if (slots_[idx].key == key) {
+            if (slots_[idx].state == State::kDeleted) {
+                if (tombstone == kNoSlot) tombstone = idx;
+            } else if (slots_[idx].key == key) {
                 slots_[idx].value = value;
                 return;
             }
@@ -155,6 +166,7 @@ public:
                 slots_[idx].value.~V();
                 slots_[idx].state = State::kDeleted;
                 --count_;
+                ++tombstones_;
                 return true;
             }
             idx = (idx + 1) & (capacity_ - 1);
@@ -203,7 +215,8 @@ public:
                 slots_[i].state = State::kEmpty;
             }
         }
-        count_ = 0;
+        count_      = 0;
+        tombstones_ = 0;
     }
 
 private:
@@ -216,7 +229,13 @@ private:
     };
 
     void grow() {
-        usize new_cap = capacity_ == 0 ? 16 : capacity_ * 2;
+        // Size from the live element count, not the old capacity: a rehash
+        // triggered purely by tombstone buildup keeps the same capacity (just
+        // sweeping the tombstones away), while genuine fullness still doubles.
+        usize needed  = (count_ + 1) * 2;
+        usize new_cap = capacity_ == 0 ? 16 : capacity_;
+        while (new_cap < needed) new_cap *= 2;
+
         Slot* new_slots = static_cast<Slot*>(
             alloc_.alloc(sizeof(Slot) * new_cap, alignof(Slot)));
         for (usize i = 0; i < new_cap; ++i)
@@ -225,9 +244,10 @@ private:
         Slot* old_slots  = slots_;
         usize old_cap    = capacity_;
 
-        slots_    = new_slots;
-        capacity_ = new_cap;
-        count_    = 0;
+        slots_      = new_slots;
+        capacity_   = new_cap;
+        count_      = 0;
+        tombstones_ = 0;
 
         for (usize i = 0; i < old_cap; ++i) {
             if (old_slots[i].state == State::kOccupied) {
@@ -250,9 +270,10 @@ private:
     }
 
     Allocator alloc_;
-    Slot* slots_    = nullptr;
-    usize capacity_ = 0;
-    usize count_    = 0;
+    Slot* slots_      = nullptr;
+    usize capacity_   = 0;
+    usize count_      = 0;
+    usize tombstones_ = 0;
 };
 
 } // namespace ge

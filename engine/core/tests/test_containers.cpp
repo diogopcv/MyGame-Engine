@@ -216,3 +216,54 @@ TEST_CASE("HashMap: lookup after remove still finds other keys") {
     }
     arena.shutdown();
 }
+
+// Find two distinct u32 keys that map to the same initial bucket for the
+// map's first-grown capacity (16). The map computes `hash_key(k) & (cap-1)`,
+// so we reproduce that exactly. By pigeonhole, a collision exists among the
+// first 17 small keys.
+namespace {
+    bool find_colliding_pair(ge::u32& a, ge::u32& b) {
+        constexpr ge::u32 kCap = 16; // capacity after the first set()'s grow()
+        ge::u32 first_in_bucket[kCap];
+        bool    seen[kCap] = {};
+        for (ge::u32 x = 1; x <= 64; ++x) {
+            ge::u32 bk = static_cast<ge::u32>(ge::detail::hash_key(x) & (kCap - 1));
+            if (seen[bk]) { a = first_in_bucket[bk]; b = x; return true; }
+            seen[bk] = true;
+            first_in_bucket[bk] = x;
+        }
+        return false;
+    }
+}
+
+// Reproduces the open-addressing duplicate-insertion bug: when a tombstone
+// sits earlier in a key's probe chain than the key itself, set() reinserts at
+// the tombstone instead of updating the existing entry. Two colliding keys A,B
+// land in adjacent slots; removing A tombstones the bucket B probes through, so
+// re-setting B writes a SECOND copy. Currently FAILS (size becomes 2, and the
+// stale duplicate shadows the update on lookup/remove).
+TEST_CASE("HashMap: re-set after removing a colliding key must not duplicate") {
+    ge::u32 a = 0, b = 0;
+    REQUIRE(find_colliding_pair(a, b));
+
+    ge::Arena arena; arena.init(GE_KILOBYTES(64));
+    {
+        ge::HashMap<ge::u32, int> map(make_alloc(arena));
+        map.set(a, 1);          // A occupies its bucket
+        map.set(b, 2);          // B collides, lands in the next slot
+        REQUIRE(map.remove(a)); // bucket B probes through becomes a tombstone
+        REQUIRE(map.size() == 1);
+
+        map.set(b, 3);          // update B — must NOT create a second entry
+
+        REQUIRE(map.size() == 1);     // bug: becomes 2
+        REQUIRE(*map.get(b) == 3);
+
+        // The duplicate (if present) holds the stale value 2 and survives the
+        // remove of the first copy, so B must be fully gone afterwards.
+        REQUIRE(map.remove(b));
+        REQUIRE(map.get(b) == nullptr); // bug: stale duplicate still found
+        REQUIRE(map.size() == 0);       // bug: 1 left over
+    }
+    arena.shutdown();
+}
