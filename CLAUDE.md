@@ -183,18 +183,17 @@ Run before claiming a task done, and report the answers:
 7. When something is ambiguous or would violate a rule, ask or flag — don't guess.
 8. When the deliverable is done (tests green by the definition above), update statuses: the phase-doc header, the `plan.md` Status log, and the module checklist.
 
-## Current Phase: Phase 1 — First Triangle (DX12 Gauntlet)
+## Current Phase: Phase 3 — Renderer Proper
 
-Status: Not started.
+Phase 2 is **complete**: allocator suite (pool, stack, Allocator interface),
+containers (Array, HashMap), string system (StringId), platform file I/O,
+reflection (ADR-0007 accepted), binary serialization, job system, resource/handle
+system, profiler, CVar system. 109 core + 4 platform tests, all green.
 
-Phase 0 is **complete**: math library (vec2/3/4, mat4, quat, transform/projection
-helpers, look-at/perspective), doctest + CTest harness, 41 unit tests all green.
+Phase 3 goal: clean RHI abstraction, render/frame graph, mesh/material/texture
+resources, model loader, camera, forward or deferred lighting, shadows.
 
-Phase 1 goal: DX12 device, swapchain, command queue/list/allocators, fences,
-descriptor heaps, root signature, PSO, vertex buffer, draw call — ending with a
-spinning textured cube using the math library's MVP matrix.
-
-See `docs/phases/01-dx12-triangle.md` for full design details.
+See `docs/phases/03-renderer.md` for design details (expand before coding).
 
 ## Golden Rules (Never Violate)
 

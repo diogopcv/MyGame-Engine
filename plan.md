@@ -57,7 +57,7 @@ Platform (Layer 0)
 - [x] Window + message pump (Win32)
 - [x] High-resolution timer
 - [x] Virtual memory (VirtualAlloc wrappers)
-- [ ] File I/O primitives
+- [x] File I/O primitives
 - [ ] Threading primitives
 - [ ] Dynamic library loading
 
@@ -66,14 +66,14 @@ Core (Layer 1)
 - [x] Logging
 - [x] Asserts
 - [x] Arena (linear) allocator
-- [ ] Math library (vec2/3/4, mat4, quat, transforms)
-- [ ] Allocator suite (pool, stack, general-purpose)
-- [ ] Job / task system
-- [ ] Containers (data-oriented: arrays, hash maps, handle pools)
-- [ ] Reflection / type system  ← keystone
-- [ ] Serialization
-- [ ] String system
-- [ ] Config / CVar system
+- [x] Math library (vec2/3/4, mat4, quat, transforms)
+- [x] Allocator suite (pool, stack + Allocator interface)
+- [x] Job / task system
+- [x] Containers (Array<T>, HashMap<K,V>, HandleTable<T>)
+- [x] Reflection / type system  ← keystone (ADR-0007 accepted)
+- [x] Serialization
+- [x] String system (StringId / FNV-1a)
+- [x] Config / CVar system
 - [ ] Event / message bus
 
 Resources (Layer 2)
@@ -118,7 +118,7 @@ Accepted:
 - ADR-0006 — DX12 descriptor & binding model (classic root signature for now).
 
 Open — decide before the noted phase:
-- ADR-0007 — Reflection / type-system mechanism (Phase 2).
+- ADR-0007 — Reflection / type-system mechanism (Phase 2, accepted).
 - ADR-0008 — ECS storage model (Phase 4).
 - ADR-0009 — Scripting / iteration model (Phase 4).
 - Editor scope: engine+editor vs engine-only (open) — until decided, design as
@@ -146,12 +146,12 @@ done, regardless of how complete the feature looks.
   matrix from the math library.
 - DoD: a spinning, textured cube at a stable, vsynced frame rate.
 
-### Phase 2 — Harden the core
+### Phase 2 — Harden the core  [COMPLETE]
 - Detail: [`docs/phases/02-harden-core.md`](docs/phases/02-harden-core.md)
-- Job/task system; full allocator suite (arena, pool, stack, general-purpose);
-  reflection/type system; serialization; resource/handle system; file system
-  abstraction; strings.
-- Build early here: lightweight profiler, debug-draw, CVar/console.
+- Allocator suite (pool, stack, Allocator interface); containers (Array,
+  HashMap); string system (StringId); file I/O; reflection/type system
+  (ADR-0007); binary serialization; job system; resource/handle system;
+  profiler; CVar system.
 - DoD: subsystems allocate via arenas/pools; types round-trip through
   serialization; the in-engine profiler shows per-frame timings.
 
@@ -304,6 +304,13 @@ asserts — that is expected, not a gap.
   vendored stb_image/stb_image_write back a new golden-image CTest (90
   frames @ fixed dt vs. `engine/gfx/tests/golden/cube.png`). Smoke + golden
   tests green, zero debug-layer errors.
-- Next up: Phase 2 — Harden the core (job/task system, allocator suite,
-  reflection/serialization, resource/handle system, file system, strings;
-  lightweight profiler/debug-draw/CVar console).
+- 2026-06-17 Phase 2 complete: allocator suite (pool, stack, Allocator
+  function-pointer interface), containers (Array<T>, HashMap<K,V>), string
+  system (StringId/FNV-1a), platform file I/O, reflection (ADR-0007 accepted:
+  annotation macros, inline registration), binary serialization with round-trip,
+  job system (thread pool + counter sync), resource/handle system (Handle<Tag>
+  + HandleTable with generation tracking), profiler (GE_PROFILE_SCOPE macro,
+  ring buffer), CVar system. 109 core + 4 platform tests, all green. Profiler
+  wired into sandbox main loop with per-frame timing output.
+- Next up: Phase 3 — Renderer proper (RHI abstraction, render/frame graph,
+  mesh/material/texture resources, model loading, camera, lighting, shadows).

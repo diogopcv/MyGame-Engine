@@ -1,15 +1,8 @@
 #include "core/arena.h"
 #include "core/assert.h"
-#include "platform/memory.h"   // core -> platform: the allowed dependency direction
+#include "platform/memory.h"
 
 namespace ge {
-
-namespace {
-    // Round `value` up to the next multiple of `align` (power of two).
-    usize align_up(usize value, usize align) {
-        return (value + (align - 1)) & ~(align - 1);
-    }
-}
 
 void Arena::init(usize size) {
     base_   = static_cast<u8*>(platform::mem_alloc(size));
@@ -29,7 +22,7 @@ void Arena::shutdown() {
 
 void* Arena::alloc(usize size, usize align) {
     const usize aligned_offset = align_up(offset_, align);
-    GE_ASSERT(aligned_offset + size <= size_); // arena exhausted
+    GE_ASSERT(aligned_offset + size <= size_);
     void* ptr = base_ + aligned_offset;
     offset_   = aligned_offset + size;
     return ptr;
@@ -37,6 +30,17 @@ void* Arena::alloc(usize size, usize align) {
 
 void Arena::reset() {
     offset_ = 0;
+}
+
+namespace {
+    void* arena_alloc_fn(void* ctx, usize size, usize align) {
+        return static_cast<Arena*>(ctx)->alloc(size, align);
+    }
+    void arena_free_fn(void*, void*, usize) {}
+}
+
+Allocator Arena::allocator() {
+    return { arena_alloc_fn, arena_free_fn, this };
 }
 
 } // namespace ge

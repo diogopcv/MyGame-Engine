@@ -6,6 +6,14 @@
 add_library(ge_core STATIC
     src/log.cpp
     src/arena.cpp
+    src/pool.cpp
+    src/stack_alloc.cpp
+    src/string_id.cpp
+    src/reflect.cpp
+    src/serialize.cpp
+    src/job_system.cpp
+    src/profiler.cpp
+    src/cvar.cpp
 )
 
 target_include_directories(ge_core PUBLIC include)
