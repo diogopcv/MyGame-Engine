@@ -6,6 +6,12 @@
 #include "platform/window.h"
 #include "platform/timer.h"
 #include "gfx/renderer.h"
+#include "gfx/camera.h"
+#include "gfx/light.h"
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <filesystem>
 
 int main() {
     using namespace ge;
@@ -26,7 +32,7 @@ int main() {
 
     platform::Window window;
     platform::WindowDesc desc{};
-    desc.title  = "MyEngine - Phase 2";
+    desc.title  = "MyEngine - Phase 3";
     desc.width  = 1280;
     desc.height = 720;
     if (!window.create(desc)) {
@@ -52,6 +58,48 @@ int main() {
     }
     renderer.set_clear_color(0.05f, 0.1f, 0.2f, 1.0f);
 
+    // Load model
+    {
+        wchar_t exe_path[MAX_PATH];
+        ::GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+        auto model_path = std::filesystem::path(exe_path).parent_path()
+                          / ".." / ".." / ".." / "assets" / "models" / "box.glb";
+        std::string model_str = model_path.string();
+        if (renderer.load_model(model_str.c_str(), perm.allocator())) {
+            GE_INFO("Loaded model: {}", model_str);
+        } else {
+            GE_WARN("Could not load model — using built-in cube");
+        }
+    }
+
+    // Set up camera
+    ge::gfx::Camera camera;
+    camera.position = {0, 1.5f, -3.0f};
+    camera.yaw      = 0.0f;
+    camera.pitch    = 0.0f;
+    renderer.set_camera(camera);
+
+    // Set up lighting
+    ge::gfx::DirectionalLight sun;
+    sun.direction = {0.5f, 1.0f, -0.3f};
+    sun.color     = {1.0f, 1.0f, 0.95f};
+    sun.intensity = 1.0f;
+    renderer.set_sun(sun);
+
+    ge::gfx::PointLight point_lights[2];
+    point_lights[0].position  = {2.0f, 1.0f, -1.0f};
+    point_lights[0].radius    = 8.0f;
+    point_lights[0].color     = {0.3f, 0.5f, 1.0f};
+    point_lights[0].intensity = 1.5f;
+
+    point_lights[1].position  = {-2.0f, 0.5f, 1.0f};
+    point_lights[1].radius    = 6.0f;
+    point_lights[1].color     = {1.0f, 0.3f, 0.2f};
+    point_lights[1].intensity = 1.2f;
+    renderer.set_point_lights(point_lights, 2);
+
+    bool mouse_captured = false;
+
     const f64 fixed_dt    = 1.0 / 60.0;
     f64       accumulator = 0.0;
     f64       last        = platform::now_seconds();
@@ -72,9 +120,49 @@ int main() {
         window.pump_events();
         renderer.resize(window.width(), window.height());
 
+        // Toggle mouse capture with right click
+        if (window.mouse_button_down(platform::MouseButton::Right) && !mouse_captured) {
+            mouse_captured = true;
+            window.set_mouse_capture(true);
+        } else if (!window.mouse_button_down(platform::MouseButton::Right) && mouse_captured) {
+            mouse_captured = false;
+            window.set_mouse_capture(false);
+        }
+
+        // Escape to close
+        if (window.key_down(platform::KeyCode::Escape)) {
+            break;
+        }
+
+        // Camera input
         while (accumulator >= fixed_dt) {
+            f32 move_fwd   = 0.0f;
+            f32 move_right = 0.0f;
+            f32 move_up    = 0.0f;
+
+            if (window.key_down(platform::KeyCode::W)) move_fwd   += 1.0f;
+            if (window.key_down(platform::KeyCode::S)) move_fwd   -= 1.0f;
+            if (window.key_down(platform::KeyCode::D)) move_right += 1.0f;
+            if (window.key_down(platform::KeyCode::A)) move_right -= 1.0f;
+            if (window.key_down(platform::KeyCode::E)) move_up    += 1.0f;
+            if (window.key_down(platform::KeyCode::Q)) move_up    -= 1.0f;
+
+            f32 mdx = 0.0f, mdy = 0.0f;
+            if (mouse_captured) {
+                window.mouse_delta(mdx, mdy);
+            }
+
+            f32 speed = 3.0f;
+            if (window.key_down(platform::KeyCode::LShift)) speed *= 3.0f;
+
+            ge::gfx::camera_fly_update(camera, static_cast<f32>(fixed_dt),
+                                       move_fwd, move_right, move_up,
+                                       mdx, mdy, speed);
+
             accumulator -= fixed_dt;
         }
+
+        renderer.set_camera(camera);
 
         {
             GE_PROFILE_SCOPE("render");

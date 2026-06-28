@@ -34,6 +34,9 @@ enable_testing()
 # --- Third-party: stb_image / stb_image_write (golden-image test) -----------
 add_subdirectory(third_party/stb)
 
+# --- Third-party: cgltf (glTF 2.0 parser) ----------------------------------
+add_subdirectory(third_party/cgltf)
+
 # --- Modules (built bottom-up; dependencies point downward only) -------------
 add_subdirectory(engine/platform)   # Layer 0 : OS abstraction
 add_subdirectory(engine/core)       # Layer 1 : foundation (depends on platform)

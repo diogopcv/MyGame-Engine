@@ -3,12 +3,16 @@
 # inside src/renderer_dx12.cpp; the public header is platform-clean.
 
 add_library(ge_gfx STATIC
+    src/rhi_dx12.cpp
+    src/render_graph.cpp
+    src/model_loader.cpp
     src/renderer_dx12.cpp
 )
 
 target_include_directories(ge_gfx PUBLIC include)
 
 target_link_libraries(ge_gfx PUBLIC ge_core)
+target_link_libraries(ge_gfx PRIVATE cgltf stb)
 
 if (WIN32)
     target_link_libraries(ge_gfx PRIVATE d3d12 dxgi dxguid)
@@ -51,6 +55,9 @@ endfunction()
 
 ge_gfx_compile_shader(cube_vs vs_6_0)
 ge_gfx_compile_shader(cube_ps ps_6_0)
+ge_gfx_compile_shader(model_vs vs_6_0)
+ge_gfx_compile_shader(model_ps ps_6_0)
+ge_gfx_compile_shader(shadow_vs vs_6_0)
 
 add_custom_target(ge_gfx_shaders DEPENDS ${GE_GFX_SHADER_OUTPUTS})
 add_dependencies(ge_gfx ge_gfx_shaders)

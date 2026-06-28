@@ -1,4 +1,7 @@
 #pragma once
+#include "core/allocator.h"
+#include "gfx/camera.h"
+#include "gfx/light.h"
 #include <cstdint>
 #include <vector>
 
@@ -28,77 +31,37 @@ struct RendererDesc {
  */
 class Renderer {
 public:
-    /**
-     * @brief Create the DX12 device, swap chain, command queue, and GPU resources.
-     * @param desc Renderer creation parameters.
-     * @return `true` on success.
-     */
     bool init(const RendererDesc& desc);
-
-    /** @brief Flush the GPU and release all DX12 resources. */
     void shutdown();
 
-    /**
-     * @brief Begin a new frame.
-     *
-     * Waits for this frame's slot, resets the command allocator/list, and
-     * transitions + clears the current back buffer and depth buffer.
-     *
-     * @param dt Delta time added to an internal clock (drives the cube
-     *           rotation in Milestone 4).
-     */
     void begin_frame(float dt = 0.0f);
-
-    /**
-     * @brief End the current frame.
-     *
-     * Transitions the back buffer to PRESENT, submits the command list,
-     * presents, and signals the frame's fence value.
-     */
     void end_frame();
 
-    /**
-     * @brief Handle a window resize.
-     *
-     * Flushes the GPU, resizes the swap-chain buffers, and recreates RTVs
-     * and the depth buffer.
-     *
-     * @param width  New client-area width in pixels.
-     * @param height New client-area height in pixels.
-     */
     void resize(std::uint32_t width, std::uint32_t height);
-
-    /**
-     * @brief Set the clear colour for subsequent frames.
-     * @param r Red   [0, 1].
-     * @param g Green [0, 1].
-     * @param b Blue  [0, 1].
-     * @param a Alpha [0, 1].
-     */
     void set_clear_color(float r, float g, float b, float a);
 
-    /**
-     * @brief Query the number of DX12 debug-layer error messages since init().
-     * @return Error count. Always 0 when `enable_debug_layer` was false.
-     */
-    std::uint32_t debug_error_count() const;
+    /** @brief Load a glTF model and prepare it for rendering. */
+    bool load_model(const char* path, ge::Allocator alloc);
+
+    /** @brief Set the active camera for rendering. Copied each frame. */
+    void set_camera(const Camera& cam);
+
+    /** @brief Set the directional (sun) light. */
+    void set_sun(const DirectionalLight& sun);
 
     /**
-     * @brief Read back the most recently presented back buffer as RGBA8.
-     *
-     * The output is tightly-packed, row-major, top-to-bottom.  Flushes the
-     * GPU — not for use in the hot path.
-     *
-     * @param[out] out_rgba   Receives the pixel data.
-     * @param[out] out_width  Width of the captured image.
-     * @param[out] out_height Height of the captured image.
-     * @return `true` on success.
+     * @brief Set point lights for this frame.
+     * @param lights Array of point lights.
+     * @param count  Number of lights (max kMaxPointLights).
      */
+    void set_point_lights(const PointLight* lights, std::uint32_t count);
+
+    std::uint32_t debug_error_count() const;
     bool capture_back_buffer(std::vector<std::uint8_t>& out_rgba, std::uint32_t& out_width,
                               std::uint32_t& out_height) const;
 
 private:
-    void* impl_ = nullptr; ///< Opaque pointer to RendererImpl (renderer_dx12.cpp).
+    void* impl_ = nullptr;
 };
 
 } // namespace ge::gfx

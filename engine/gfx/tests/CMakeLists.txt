@@ -2,6 +2,8 @@ add_executable(ge_gfx_tests
     test_runner.cpp
     test_smoke.cpp
     test_golden.cpp
+    test_render_graph.cpp
+    test_camera.cpp
 )
 
 target_link_libraries(ge_gfx_tests PRIVATE ge_gfx ge_platform doctest::doctest stb)

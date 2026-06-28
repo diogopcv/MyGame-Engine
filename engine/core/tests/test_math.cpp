@@ -428,6 +428,30 @@ TEST_CASE("MVP round-trip: camera at origin looking +Z") {
     REQUIRE(approx(clip_center.y / clip_center.w, 0.0f));
 }
 
+TEST_CASE("mat4_ortho_lh maps near to 0 and far to 1 in NDC") {
+    using namespace ge;
+    mat4 O = mat4_ortho_lh(-5.0f, 5.0f, -5.0f, 5.0f, 1.0f, 100.0f);
+
+    auto ndc = [&](vec4 p) {
+        vec4 clip = p * O;
+        return vec3{clip.x / clip.w, clip.y / clip.w, clip.z / clip.w};
+    };
+
+    // Near plane → z=0, far plane → z=1
+    REQUIRE(approx(ndc({0, 0, 1, 1}).z, 0.0f));
+    REQUIRE(approx(ndc({0, 0, 100, 1}).z, 1.0f));
+
+    // Boundaries map to NDC -1/+1
+    REQUIRE(approx(ndc({-5, 0, 50, 1}).x, -1.0f));
+    REQUIRE(approx(ndc({ 5, 0, 50, 1}).x,  1.0f));
+    REQUIRE(approx(ndc({0, -5, 50, 1}).y, -1.0f));
+    REQUIRE(approx(ndc({0,  5, 50, 1}).y,  1.0f));
+
+    // Origin maps to x=0, y=0 (symmetric bounds)
+    REQUIRE(approx(ndc({0, 0, 50, 1}).x, 0.0f));
+    REQUIRE(approx(ndc({0, 0, 50, 1}).y, 0.0f));
+}
+
 TEST_CASE("mat4_look_at_lh: camera offset from origin") {
     using namespace ge;
     // Camera at (0, 0, -5) looking at origin: the origin should be 5 units in front

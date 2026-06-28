@@ -185,6 +185,27 @@ inline mat4 mat4_perspective_lh(f32 fov_y, f32 aspect, f32 near_z, f32 far_z) {
 }
 
 /**
+ * @brief Left-handed orthographic projection matrix ([0,1] depth, row-vector).
+ * @param left   Left boundary of the view volume.
+ * @param right  Right boundary of the view volume.
+ * @param bottom Bottom boundary of the view volume.
+ * @param top    Top boundary of the view volume.
+ * @param near_z Distance to the near clip plane.
+ * @param far_z  Distance to the far clip plane (> near_z).
+ */
+inline mat4 mat4_ortho_lh(f32 left, f32 right, f32 bottom, f32 top, f32 near_z, f32 far_z) {
+    mat4 r{};
+    r.m[0][0] = 2.0f / (right - left);
+    r.m[1][1] = 2.0f / (top - bottom);
+    r.m[2][2] = 1.0f / (far_z - near_z);
+    r.m[3][0] = -(right + left) / (right - left);
+    r.m[3][1] = -(top + bottom) / (top - bottom);
+    r.m[3][2] = -near_z / (far_z - near_z);
+    r.m[3][3] = 1.0f;
+    return r;
+}
+
+/**
  * @brief Left-handed look-at view matrix (row-vector convention).
  * @param eye    Camera position in world space.
  * @param target Point the camera looks at.

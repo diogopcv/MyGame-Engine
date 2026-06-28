@@ -81,10 +81,10 @@ Resources (Layer 2)
 - [ ] Offline pipeline / cooker (DCC formats -> engine-native binary)
 
 Subsystems (Layer 3)
-- [x] Graphics: DX12 RHI (Phase 1 minimal slice: device/swapchain, root
-      signature/PSO, depth, constant buffers — render/frame graph still open)
-- [ ] Graphics: render / frame graph
-- [ ] Input
+- [x] Graphics: DX12 RHI (handle-based, render/frame graph, mesh/material/
+      texture, model import, camera, forward lighting, shadow mapping)
+- [x] Graphics: render / frame graph
+- [x] Input (keyboard + mouse polling in Window — full input system Phase 4)
 - [ ] Physics (from scratch)
 - [ ] Audio
 - [ ] Animation
@@ -155,7 +155,7 @@ done, regardless of how complete the feature looks.
 - DoD: subsystems allocate via arenas/pools; types round-trip through
   serialization; the in-engine profiler shows per-frame timings.
 
-### Phase 3 — Renderer proper
+### Phase 3 — Renderer proper  [COMPLETE]
 - Detail: [`docs/phases/03-renderer.md`](docs/phases/03-renderer.md)
 - Clean RHI abstraction; render/frame graph; mesh/material/texture resources;
   model loader (use cgltf/assimp for *import* only); camera; forward or deferred
@@ -315,5 +315,37 @@ asserts — that is expected, not a gap.
 - 2026-06-17 Doxygen API documentation added to all 26 public header files
   across platform (4), core (17), and gfx (1) modules plus the 4 remaining
   core math headers. Build clean, all tests green.
-- Next up: Phase 3 — Renderer proper (RHI abstraction, render/frame graph,
-  mesh/material/texture resources, model loading, camera, lighting, shadows).
+- 2026-06-18 Phase 3 Milestone 1 done: RHI abstraction. Handle-based
+  RhiDevice wrapping DX12 backend with HandleTables for buffers, textures,
+  shaders, pipelines. 4MB arena-backed descriptor heaps. Root signature with
+  2 CBVs + 2 SRV tables + 2 static samplers (configurable s0 filter per
+  pipeline). Renderer refactored to use RhiDevice. All tests green.
+- 2026-06-18 Phase 3 Milestone 2 done: Render/frame graph. RenderGraph class
+  with compile-time barrier insertion, pass execution callbacks. 5 unit tests
+  (barrier insertion, state tracking, multi-pass). All tests green.
+- 2026-06-18 Phase 3 Milestone 3 done: Mesh/material/texture + model import.
+  LitVertex (pos+normal+uv), SubMesh, Mesh, Material types. cgltf vendored
+  for glTF 2.0 parsing. Model loader extracts PBR base_color, images via
+  stb_image, merged vertex/index GPU buffers. Model pipeline with model_vs/ps
+  shaders (per-frame view/proj + per-object model/normal CBs, N·L directional
+  lighting). Smoke test loads and renders box.glb for 30 frames, 0 debug
+  errors. gen_box_glb.cpp tool creates test models. All tests green.
+- 2026-06-18 Phase 3 Milestone 4 done: Camera + forward lighting. Camera
+  struct with Euler angles, perspective projection, fly-through controller.
+  Platform Window extended with keyboard (KeyCode enum matching VK_*),
+  mouse buttons, mouse delta, and raw mouse capture (RAWINPUT). Blinn-Phong
+  shaders (directional + up to 4 point lights, specular highlights).
+  Expanded per-frame CB (384 bytes: view/proj/camera_pos/sun/point_lights/
+  light_view_proj). Sandbox: WASD + mouse-look (right-click to capture),
+  Shift for speed, Escape to quit, two colored point lights. 5 camera unit
+  tests + 1 window input test + model smoke test all green, 0 debug errors.
+- 2026-06-18 Phase 3 Milestone 5 done (Phase 3 complete): Shadow mapping.
+  2048x2048 D32_FLOAT shadow map with DepthStencil|ShaderResource (R32_TYPELESS
+  resource, typed DSV/SRV views). Depth-only shadow pipeline (shadow_vs, no PS,
+  depth bias 1000 + slope 1.0). Orthographic light projection (mat4_ortho_lh).
+  Shadow pass added to render graph before model pass, automatic
+  DepthWrite→PixelShaderResource barrier. 3x3 PCF in model_ps via
+  SamplerComparisonState. shadow_enabled flag in per-frame CB. RHI extended:
+  optional PS in pipeline creation, configurable depth bias. Ortho projection
+  unit test + all existing tests green, 0 debug errors.
+- Next up: Phase 4 — World & gameplay.
