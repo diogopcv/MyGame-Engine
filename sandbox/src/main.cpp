@@ -32,7 +32,7 @@ int main() {
 
     platform::Window window;
     platform::WindowDesc desc{};
-    desc.title  = "MyEngine - Phase 3";
+    desc.title  = "MyEngine - PBR Renderer";
     desc.width  = 1280;
     desc.height = 720;
     if (!window.create(desc)) {
@@ -63,7 +63,7 @@ int main() {
         wchar_t exe_path[MAX_PATH];
         ::GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
         auto model_path = std::filesystem::path(exe_path).parent_path()
-                          / ".." / ".." / ".." / "assets" / "models" / "box.glb";
+                          / ".." / ".." / ".." / "assets" / "models" / "DamagedHelmet.glb";
         std::string model_str = model_path.string();
         if (renderer.load_model(model_str.c_str(), perm.allocator())) {
             GE_INFO("Loaded model: {}", model_str);
@@ -72,11 +72,11 @@ int main() {
         }
     }
 
-    // Set up camera
+    // Set up camera — DamagedHelmet fits in roughly a 2-unit sphere at origin
     ge::gfx::Camera camera;
-    camera.position = {0, 1.5f, -3.0f};
+    camera.position = {0, 0.5f, -3.5f};
     camera.yaw      = 0.0f;
-    camera.pitch    = 0.0f;
+    camera.pitch    = -0.05f;
     renderer.set_camera(camera);
 
     // Set up lighting

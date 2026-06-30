@@ -58,12 +58,29 @@ struct GpuShadowCB {
     mat4 light_view_proj;
 };
 
-constexpr u32 kPerFrameCBSize  = 512; // >= sizeof(GpuPerFrameCB), 256-aligned
-constexpr u32 kPerObjectCBSize = 256;
-constexpr u32 kCubeCBSize      = 256;
-constexpr u32 kShadowCBSize    = 256; // >= sizeof(GpuShadowCB), 256-aligned
-constexpr u32 kShadowMapSize   = 2048;
-constexpr u32 kFrameCount      = 2;
+// Must match PerMaterial cbuffer in pbr_ps.hlsl exactly.
+struct GpuPerMaterialCB {
+    f32 base_color_factor[4];  //  0-15
+    f32 metallic_factor;       // 16
+    f32 roughness_factor;      // 20
+    f32 _pad[2];               // 24
+    f32 emissive_factor[3];    // 32
+    f32 has_normal_tex;        // 44
+    f32 has_mr_tex;            // 48
+    f32 has_occlusion_tex;     // 52
+    f32 has_emissive_tex;      // 56
+    f32 has_base_color_tex;    // 60
+};                             // Total: 64 bytes
+static_assert(sizeof(GpuPerMaterialCB) == 64);
+
+constexpr u32 kPerFrameCBSize    = 512; // >= sizeof(GpuPerFrameCB), 256-aligned
+constexpr u32 kPerObjectCBSize   = 256;
+constexpr u32 kPerMaterialCBSize = 256; // >= sizeof(GpuPerMaterialCB), 256-aligned
+constexpr u32 kCubeCBSize        = 256;
+constexpr u32 kShadowCBSize      = 256;
+constexpr u32 kShadowMapSize     = 2048;
+constexpr u32 kFrameCount        = 2;
+constexpr u32 kMaxPbrMaterials   = 64;
 
 std::vector<u8> load_shader_bytecode(const wchar_t* filename) {
     wchar_t exe_path[MAX_PATH];
@@ -116,11 +133,23 @@ struct RendererImpl {
     mat4           cached_light_vp{};
     bool           has_shadows = false;
 
+    // PBR resources
+    ShaderHandle   pbr_vs;
+    ShaderHandle   pbr_ps;
+    PipelineHandle pbr_pipeline;
+    TextureHandle  default_white_tex;  ///< 1×1 white fallback for missing PBR maps.
+    TextureHandle  default_normal_tex; ///< 1×1 flat normal {128,128,255}.
+    BufferHandle   per_material_cbs[kMaxPbrMaterials];
+    u32            per_material_cb_count = 0;
+    bool           has_pbr_model = false;
+
     // Scene state (set by user, read each frame)
     Camera           camera;
     DirectionalLight sun;
     PointLight       point_lights[kMaxPointLights];
     u32              point_light_count = 0;
+
+    mat4 model_transform = mat4_identity();
 
     f32  total_time = 0.0f;
     f32  clear_color[4] = {0.05f, 0.1f, 0.2f, 1.0f};
@@ -293,6 +322,103 @@ struct RendererImpl {
         has_shadows = true;
         return true;
     }
+
+    bool create_pbr_pipeline() {
+        std::vector<u8> vs_bytecode = load_shader_bytecode(L"pbr_vs.cso");
+        std::vector<u8> ps_bytecode = load_shader_bytecode(L"pbr_ps.cso");
+        if (vs_bytecode.empty() || ps_bytecode.empty()) return false;
+
+        pbr_vs = rhi.create_shader({vs_bytecode.data(), static_cast<u32>(vs_bytecode.size())});
+        pbr_ps = rhi.create_shader({ps_bytecode.data(), static_cast<u32>(ps_bytecode.size())});
+        if (!pbr_vs.is_valid() || !pbr_ps.is_valid()) return false;
+
+        InputElement input_elements[] = {
+            {"POSITION", 0, Format::R32G32B32_FLOAT,    0},
+            {"NORMAL",   0, Format::R32G32B32_FLOAT,   12},
+            {"TEXCOORD", 0, Format::R32G32_FLOAT,       24},
+            {"TANGENT",  0, Format::R32G32B32A32_FLOAT, 32},
+        };
+
+        PipelineDesc pipe_desc{};
+        pipe_desc.vertex_shader       = pbr_vs;
+        pipe_desc.pixel_shader        = pbr_ps;
+        pipe_desc.input_elements      = input_elements;
+        pipe_desc.input_element_count = 4;
+        pipe_desc.input_stride        = sizeof(LitVertex);
+        pipe_desc.cull_mode           = CullMode::Back;
+        pipe_desc.depth_enable        = true;
+        pipe_desc.depth_func          = CompareFunc::Less;
+        pipe_desc.rt_format           = Format::R8G8B8A8_UNORM;
+        pipe_desc.ds_format           = Format::D32_FLOAT;
+        pipe_desc.sampler_filter      = FilterMode::Linear;
+        pipe_desc.root_layout         = RootLayout::PBR;
+        pbr_pipeline = rhi.create_pipeline(pipe_desc);
+        if (!pbr_pipeline.is_valid()) return false;
+
+        // Default 1×1 textures for missing PBR maps
+        const u8 white_px[4]  = {255, 255, 255, 255};
+        const u8 normal_px[4] = {128, 128, 255, 255}; // flat tangent-space normal
+
+        TextureDesc td{};
+        td.width = td.height = 1;
+        td.format       = Format::R8G8B8A8_UNORM;
+        td.usage        = TextureUsage::ShaderResource;
+        td.row_pitch    = 4;
+
+        td.initial_data = white_px;
+        default_white_tex = rhi.create_texture(td);
+
+        td.initial_data = normal_px;
+        default_normal_tex = rhi.create_texture(td);
+
+        return default_white_tex.is_valid() && default_normal_tex.is_valid();
+    }
+
+    void destroy_pbr_material_cbs() {
+        for (u32 i = 0; i < per_material_cb_count; ++i) {
+            if (per_material_cbs[i].is_valid()) {
+                rhi.unmap_buffer(per_material_cbs[i]);
+                rhi.destroy_buffer(per_material_cbs[i]);
+                per_material_cbs[i] = {};
+            }
+        }
+        per_material_cb_count = 0;
+        has_pbr_model = false;
+    }
+
+    bool create_pbr_material_cbs() {
+        destroy_pbr_material_cbs();
+        const u32 count = (loaded_model.material_count < kMaxPbrMaterials)
+                          ? loaded_model.material_count : kMaxPbrMaterials;
+        per_material_cb_count = count;
+
+        for (u32 i = 0; i < count; ++i) {
+            per_material_cbs[i] = rhi.create_buffer(
+                {kPerMaterialCBSize, BufferUsage::Constant, true, nullptr});
+            if (!per_material_cbs[i].is_valid()) return false;
+
+            const Material& mat = loaded_model.materials[i];
+            GpuPerMaterialCB cb{};
+            cb.base_color_factor[0] = mat.base_color[0];
+            cb.base_color_factor[1] = mat.base_color[1];
+            cb.base_color_factor[2] = mat.base_color[2];
+            cb.base_color_factor[3] = mat.base_color[3];
+            cb.metallic_factor      = mat.metallic_factor;
+            cb.roughness_factor     = mat.roughness_factor;
+            cb.emissive_factor[0]   = mat.emissive_factor[0];
+            cb.emissive_factor[1]   = mat.emissive_factor[1];
+            cb.emissive_factor[2]   = mat.emissive_factor[2];
+            cb.has_normal_tex       = mat.has_normal_texture ? 1.0f : 0.0f;
+            cb.has_mr_tex           = mat.has_metallic_roughness_texture ? 1.0f : 0.0f;
+            cb.has_occlusion_tex    = mat.has_occlusion_texture ? 1.0f : 0.0f;
+            cb.has_emissive_tex     = mat.has_emissive_texture ? 1.0f : 0.0f;
+            cb.has_base_color_tex   = mat.has_albedo_texture ? 1.0f : 0.0f;
+
+            void* mapped = rhi.map_buffer(per_material_cbs[i]);
+            if (mapped) std::memcpy(mapped, &cb, sizeof(cb));
+        }
+        return true;
+    }
 };
 
 // -- Pass callbacks ---------------------------------------------------------
@@ -355,8 +481,8 @@ static void shadow_pass_execute(RhiDevice& rhi, void* user_data) {
     if (mapped) std::memcpy(mapped, &shadow_cb, sizeof(shadow_cb));
 
     GpuPerObjectCB obj_cb{};
-    obj_cb.model         = mat4_identity();
-    obj_cb.normal_matrix = mat4_identity();
+    obj_cb.model         = impl->model_transform;
+    obj_cb.normal_matrix = impl->model_transform; // pure rotation: inverse-transpose = itself
     void* obj_mapped = rhi.map_buffer(impl->per_object_cb[fi]);
     if (obj_mapped) std::memcpy(obj_mapped, &obj_cb, sizeof(obj_cb));
 
@@ -463,6 +589,101 @@ static void model_pass_execute(RhiDevice& rhi, void* user_data) {
     }
 }
 
+static void pbr_pass_execute(RhiDevice& rhi, void* user_data) {
+    auto* impl = static_cast<RendererImpl*>(user_data);
+
+    TextureHandle bb = rhi.back_buffer();
+    TextureHandle db = rhi.depth_buffer();
+
+    rhi.clear_render_target(bb, impl->clear_color);
+    rhi.clear_depth(db, 1.0f);
+    rhi.set_render_targets(&bb, 1, db);
+
+    const f32 aspect = static_cast<f32>(rhi.width()) / static_cast<f32>(rhi.height());
+    const u32 fi     = rhi.back_buffer().index % kFrameCount;
+
+    // Per-frame CB (same layout as Blinn-Phong pass)
+    GpuPerFrameCB frame_cb{};
+    frame_cb.view         = impl->camera.view_matrix();
+    frame_cb.proj         = impl->camera.proj_matrix(aspect);
+    frame_cb.camera_pos[0] = impl->camera.position.x;
+    frame_cb.camera_pos[1] = impl->camera.position.y;
+    frame_cb.camera_pos[2] = impl->camera.position.z;
+
+    const vec3 sun_dir       = normalize(impl->sun.direction);
+    frame_cb.sun_direction[0] = sun_dir.x;
+    frame_cb.sun_direction[1] = sun_dir.y;
+    frame_cb.sun_direction[2] = sun_dir.z;
+    frame_cb.sun_color[0]     = impl->sun.color.x;
+    frame_cb.sun_color[1]     = impl->sun.color.y;
+    frame_cb.sun_color[2]     = impl->sun.color.z;
+    frame_cb.sun_intensity    = impl->sun.intensity;
+    frame_cb.point_light_count = static_cast<i32>(impl->point_light_count);
+    for (u32 i = 0; i < impl->point_light_count && i < kMaxPointLights; ++i) {
+        const PointLight& pl = impl->point_lights[i];
+        frame_cb.point_positions[i][0] = pl.position.x;
+        frame_cb.point_positions[i][1] = pl.position.y;
+        frame_cb.point_positions[i][2] = pl.position.z;
+        frame_cb.point_positions[i][3] = pl.radius;
+        frame_cb.point_colors[i][0]    = pl.color.x;
+        frame_cb.point_colors[i][1]    = pl.color.y;
+        frame_cb.point_colors[i][2]    = pl.color.z;
+        frame_cb.point_colors[i][3]    = pl.intensity;
+    }
+    frame_cb.shadow_enabled  = impl->has_shadows ? 1.0f : 0.0f;
+    frame_cb.light_view_proj = impl->cached_light_vp;
+
+    void* fm = rhi.map_buffer(impl->per_frame_cb[fi]);
+    if (fm) std::memcpy(fm, &frame_cb, sizeof(frame_cb));
+
+    // Per-object CB (model transform set via set_model_transform)
+    GpuPerObjectCB obj_cb{};
+    obj_cb.model         = impl->model_transform;
+    obj_cb.normal_matrix = impl->model_transform; // pure rotation: inverse-transpose = itself
+    void* om = rhi.map_buffer(impl->per_object_cb[fi]);
+    if (om) std::memcpy(om, &obj_cb, sizeof(obj_cb));
+
+    const f32 w = static_cast<f32>(rhi.width());
+    const f32 h = static_cast<f32>(rhi.height());
+
+    rhi.set_pipeline(impl->pbr_pipeline);
+    rhi.set_constant_buffer(0, impl->per_frame_cb[fi]);
+    rhi.set_constant_buffer(1, impl->per_object_cb[fi]);
+    rhi.set_viewport(0, 0, w, h, 0, 1);
+    rhi.set_scissor(0, 0, rhi.width(), rhi.height());
+    rhi.set_vertex_buffer(impl->loaded_model.mesh.vertex_buffer, sizeof(LitVertex));
+    rhi.set_index_buffer(impl->loaded_model.mesh.index_buffer, Format::R32_UINT);
+
+    const Mesh& mesh = impl->loaded_model.mesh;
+    for (u32 si = 0; si < mesh.sub_mesh_count; ++si) {
+        const SubMesh& sub = mesh.sub_meshes[si];
+        const u32 mat_idx  = (sub.material_index < impl->per_material_cb_count)
+                             ? sub.material_index : 0;
+        const Material& mat = impl->loaded_model.materials[mat_idx];
+
+        // Per-material CB  (slot 2)
+        rhi.set_constant_buffer(2, impl->per_material_cbs[mat_idx]);
+
+        // PBR texture maps (slots 3–8)
+        rhi.set_texture(3, mat.has_albedo_texture
+                           ? mat.albedo_texture : impl->default_white_tex);
+        rhi.set_texture(4, mat.has_metallic_roughness_texture
+                           ? mat.metallic_roughness_texture : impl->default_white_tex);
+        rhi.set_texture(5, mat.has_normal_texture
+                           ? mat.normal_texture : impl->default_normal_tex);
+        rhi.set_texture(6, mat.has_occlusion_texture
+                           ? mat.occlusion_texture : impl->default_white_tex);
+        rhi.set_texture(7, mat.has_emissive_texture
+                           ? mat.emissive_texture : impl->default_white_tex);
+        if (impl->has_shadows)
+            rhi.set_texture(8, impl->shadow_map);
+        else
+            rhi.set_texture(8, impl->default_white_tex); // dummy; shadow_enabled=0
+
+        rhi.draw_indexed(sub.index_count, sub.index_offset, sub.base_vertex);
+    }
+}
+
 // -- Renderer implementation ------------------------------------------------
 
 bool Renderer::init(const RendererDesc& desc) {
@@ -495,6 +716,10 @@ bool Renderer::init(const RendererDesc& desc) {
         GE_WARN("Shadow resources creation failed (shadow shader may not be compiled yet)");
     }
 
+    if (!impl->create_pbr_pipeline()) {
+        GE_WARN("PBR pipeline creation failed (pbr shaders may not be compiled yet)");
+    }
+
     GE_INFO("Renderer initialized ({}x{})", desc.width, desc.height);
     return true;
 }
@@ -514,6 +739,10 @@ void Renderer::shutdown() {
             impl->rhi.unmap_buffer(impl->shadow_cb[i]);
     }
 
+    impl->destroy_pbr_material_cbs();
+    if (impl->default_white_tex.is_valid())  impl->rhi.destroy_texture(impl->default_white_tex);
+    if (impl->default_normal_tex.is_valid()) impl->rhi.destroy_texture(impl->default_normal_tex);
+
     impl->rhi.shutdown();
     delete impl;
     impl_ = nullptr;
@@ -523,6 +752,7 @@ bool Renderer::load_model(const char* path, ge::Allocator alloc) {
     auto* impl = static_cast<RendererImpl*>(impl_);
 
     if (impl->has_model) {
+        impl->destroy_pbr_material_cbs();
         destroy_model(impl->loaded_model, impl->rhi);
         impl->has_model = false;
     }
@@ -532,12 +762,26 @@ bool Renderer::load_model(const char* path, ge::Allocator alloc) {
     }
 
     impl->has_model = true;
+
+    if (impl->pbr_pipeline.is_valid()) {
+        if (impl->create_pbr_material_cbs()) {
+            impl->has_pbr_model = true;
+        } else {
+            GE_WARN("Failed to create per-material CBs — falling back to Blinn-Phong");
+        }
+    }
+
     return true;
 }
 
 void Renderer::set_camera(const Camera& cam) {
     auto* impl = static_cast<RendererImpl*>(impl_);
     impl->camera = cam;
+}
+
+void Renderer::set_model_transform(const mat4& transform) {
+    auto* impl = static_cast<RendererImpl*>(impl_);
+    impl->model_transform = transform;
 }
 
 void Renderer::set_sun(const DirectionalLight& sun) {
@@ -565,10 +809,23 @@ void Renderer::begin_frame(float dt) {
     impl->graph.import(bb, ResourceState::Present);
     impl->graph.import(db, ResourceState::DepthWrite);
 
-    if (impl->has_model && impl->model_pipeline.is_valid()) {
+    if (impl->has_model && impl->has_pbr_model && impl->pbr_pipeline.is_valid()) {
+        // PBR render path
         if (impl->has_shadows) {
             impl->graph.import(impl->shadow_map, ResourceState::DepthWrite);
+            impl->graph.add_pass("shadow", shadow_pass_execute, impl);
+            impl->graph.pass_write(impl->shadow_map, ResourceState::DepthWrite);
+        }
 
+        impl->graph.add_pass("pbr", pbr_pass_execute, impl);
+        impl->graph.pass_write(bb, ResourceState::RenderTarget);
+        impl->graph.pass_write(db, ResourceState::DepthWrite);
+        if (impl->has_shadows)
+            impl->graph.pass_read(impl->shadow_map, ResourceState::PixelShaderResource);
+    } else if (impl->has_model && impl->model_pipeline.is_valid()) {
+        // Blinn-Phong fallback
+        if (impl->has_shadows) {
+            impl->graph.import(impl->shadow_map, ResourceState::DepthWrite);
             impl->graph.add_pass("shadow", shadow_pass_execute, impl);
             impl->graph.pass_write(impl->shadow_map, ResourceState::DepthWrite);
         }

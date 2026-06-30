@@ -348,4 +348,20 @@ asserts — that is expected, not a gap.
   SamplerComparisonState. shadow_enabled flag in per-frame CB. RHI extended:
   optional PS in pipeline creation, configurable depth bias. Ortho projection
   unit test + all existing tests green, 0 debug errors.
+- 2026-06-29 PBR renderer upgrade (Phase 3 addendum): Cook-Torrance BRDF
+  (GGX/D, Smith/G, Schlick/F), tangent-space normal maps, metallic-roughness
+  workflow. New `RootLayout::PBR` root signature (3 CBVs + 6 SRV tables).
+  `LitVertex` gains `tangent[4]` (stride 32 → 48 bytes). Model loader now
+  extracts tangents and all five PBR maps (base color, metallic-roughness,
+  normal, occlusion, emissive). `pbr_vs.hlsl` + `pbr_ps.hlsl` added.
+  Sandbox loads DamagedHelmet.glb as the PBR reference scene.
+  `Renderer::set_model_transform(const mat4&)` added so callers can set a
+  per-frame model-to-world matrix (used by shadow pass, PBR pass, and Blinn-
+  Phong pass). Dedicated PBR smoke test added: loads DamagedHelmet.glb,
+  renders 300 frames (~5 s at 60 fps) with white directional + white fill
+  light, model rotating via `mat4_rotation_y(time)`, asserts 0 DX12 debug
+  errors. Fixed `SetBreakOnSeverity(ERROR, TRUE)` crash in headless CTest:
+  the INT3 breakpoint fires an unhandled SEH when no debugger is attached;
+  gated it on `IsDebuggerPresent()` so it only fires in interactive
+  debugging. All 3 CTest suites green (14 gfx test cases, 0 debug errors).
 - Next up: Phase 4 — World & gameplay.

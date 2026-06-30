@@ -1,5 +1,6 @@
 #pragma once
 #include "core/allocator.h"
+#include "core/mat4.h"
 #include "gfx/camera.h"
 #include "gfx/light.h"
 #include <cstdint>
@@ -45,6 +46,14 @@ public:
 
     /** @brief Set the active camera for rendering. Copied each frame. */
     void set_camera(const Camera& cam);
+
+    /**
+     * @brief Set the model-to-world transform for the currently loaded model.
+     *
+     * For a pure rotation matrix the normal matrix equals the rotation itself.
+     * Call this before @c begin_frame to take effect on the current frame.
+     */
+    void set_model_transform(const mat4& transform);
 
     /** @brief Set the directional (sun) light. */
     void set_sun(const DirectionalLight& sun);

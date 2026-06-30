@@ -58,6 +58,8 @@ ge_gfx_compile_shader(cube_ps ps_6_0)
 ge_gfx_compile_shader(model_vs vs_6_0)
 ge_gfx_compile_shader(model_ps ps_6_0)
 ge_gfx_compile_shader(shadow_vs vs_6_0)
+ge_gfx_compile_shader(pbr_vs vs_6_0)
+ge_gfx_compile_shader(pbr_ps ps_6_0)
 
 add_custom_target(ge_gfx_shaders DEPENDS ${GE_GFX_SHADER_OUTPUTS})
 add_dependencies(ge_gfx ge_gfx_shaders)

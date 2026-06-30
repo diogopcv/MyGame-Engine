@@ -96,15 +96,51 @@ bool load_model_gltf(const char* path, RhiDevice& rhi, Allocator alloc, Model& o
                 mat.base_color[1] = pbr.base_color_factor[1];
                 mat.base_color[2] = pbr.base_color_factor[2];
                 mat.base_color[3] = pbr.base_color_factor[3];
+                mat.metallic_factor  = pbr.metallic_factor;
+                mat.roughness_factor = pbr.roughness_factor;
 
                 if (pbr.base_color_texture.texture && pbr.base_color_texture.texture->image) {
-                    cgltf_size img_idx = cgltf_image_index(data, pbr.base_color_texture.texture->image);
-                    if (img_idx < out.texture_count && out.textures[img_idx].is_valid()) {
-                        mat.albedo_texture = out.textures[img_idx];
+                    cgltf_size idx = cgltf_image_index(data, pbr.base_color_texture.texture->image);
+                    if (idx < out.texture_count && out.textures[idx].is_valid()) {
+                        mat.albedo_texture     = out.textures[idx];
                         mat.has_albedo_texture = true;
                     }
                 }
+                if (pbr.metallic_roughness_texture.texture &&
+                    pbr.metallic_roughness_texture.texture->image) {
+                    cgltf_size idx = cgltf_image_index(
+                        data, pbr.metallic_roughness_texture.texture->image);
+                    if (idx < out.texture_count && out.textures[idx].is_valid()) {
+                        mat.metallic_roughness_texture     = out.textures[idx];
+                        mat.has_metallic_roughness_texture = true;
+                    }
+                }
             }
+
+            if (gmat.normal_texture.texture && gmat.normal_texture.texture->image) {
+                cgltf_size idx = cgltf_image_index(data, gmat.normal_texture.texture->image);
+                if (idx < out.texture_count && out.textures[idx].is_valid()) {
+                    mat.normal_texture     = out.textures[idx];
+                    mat.has_normal_texture = true;
+                }
+            }
+            if (gmat.occlusion_texture.texture && gmat.occlusion_texture.texture->image) {
+                cgltf_size idx = cgltf_image_index(data, gmat.occlusion_texture.texture->image);
+                if (idx < out.texture_count && out.textures[idx].is_valid()) {
+                    mat.occlusion_texture     = out.textures[idx];
+                    mat.has_occlusion_texture = true;
+                }
+            }
+            if (gmat.emissive_texture.texture && gmat.emissive_texture.texture->image) {
+                cgltf_size idx = cgltf_image_index(data, gmat.emissive_texture.texture->image);
+                if (idx < out.texture_count && out.textures[idx].is_valid()) {
+                    mat.emissive_texture     = out.textures[idx];
+                    mat.has_emissive_texture = true;
+                }
+            }
+            mat.emissive_factor[0] = gmat.emissive_factor[0];
+            mat.emissive_factor[1] = gmat.emissive_factor[1];
+            mat.emissive_factor[2] = gmat.emissive_factor[2];
         }
     }
 
@@ -141,6 +177,12 @@ bool load_model_gltf(const char* path, RhiDevice& rhi, Allocator alloc, Model& o
 
     // --- Build merged vertex/index data ---
     std::vector<LitVertex> vertices(total_vertices);
+    // Default tangent: +X axis, bitangent sign +1.  Overwritten per-primitive if
+    // the glTF mesh provides a TANGENT attribute.
+    for (auto& v : vertices) {
+        v.tangent[0] = 1.0f; v.tangent[1] = 0.0f;
+        v.tangent[2] = 0.0f; v.tangent[3] = 1.0f;
+    }
     std::vector<u32> indices(total_indices);
     out.mesh.sub_meshes = alloc.alloc_n<SubMesh>(total_prims);
     out.mesh.sub_mesh_count = total_prims;
@@ -184,6 +226,15 @@ bool load_model_gltf(const char* path, RhiDevice& rhi, Allocator alloc, Model& o
                         cgltf_accessor_read_float(acc, vi, uv, 2);
                         vertices[vert_offset + vi].uv[0] = uv[0];
                         vertices[vert_offset + vi].uv[1] = uv[1];
+                    }
+                } else if (attr.type == cgltf_attribute_type_tangent) {
+                    for (cgltf_size vi = 0; vi < acc->count; ++vi) {
+                        f32 t[4] = {1,0,0,1};
+                        cgltf_accessor_read_float(acc, vi, t, 4);
+                        vertices[vert_offset + vi].tangent[0] = t[0];
+                        vertices[vert_offset + vi].tangent[1] = t[1];
+                        vertices[vert_offset + vi].tangent[2] = t[2];
+                        vertices[vert_offset + vi].tangent[3] = t[3];
                     }
                 }
             }

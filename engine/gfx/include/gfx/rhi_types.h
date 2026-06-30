@@ -36,6 +36,7 @@ using PipelineHandle = Handle<PipelineTag>;
 enum class Format : u8 {
     Unknown = 0,
     R8G8B8A8_UNORM,
+    R8G8B8A8_UNORM_SRGB, ///< sRGB-encoded colour (hardware linearises on sample).
     R32G32_FLOAT,
     R32G32B32_FLOAT,
     R32G32B32A32_FLOAT,
@@ -156,6 +157,17 @@ struct InputElement {
     u32         offset         = 0;           ///< Byte offset within the vertex.
 };
 
+/**
+ * @brief Root-signature layout variant.
+ *
+ * Default — 2 CBVs (b0,b1) + 2 SRV tables (t0,t1).
+ * PBR     — 3 CBVs (b0,b1,b2) + 6 SRV tables (t0–t5).
+ */
+enum class RootLayout : u8 {
+    Default,
+    PBR,
+};
+
 /** @brief Descriptor for creating a graphics pipeline state. */
 struct PipelineDesc {
     ShaderHandle       vertex_shader;
@@ -176,6 +188,7 @@ struct PipelineDesc {
     f32                depth_bias_clamp   = 0.0f;
     f32                slope_scaled_depth_bias = 0.0f;
     FilterMode         sampler_filter     = FilterMode::Point; ///< Static sampler s0 filter mode.
+    RootLayout         root_layout        = RootLayout::Default; ///< Root-signature variant.
 };
 
 /** @brief Descriptor for initialising the RHI device. */

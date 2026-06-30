@@ -7,11 +7,17 @@
  */
 namespace ge::gfx {
 
-/** @brief Vertex format for lit geometry: position + normal + UV. */
+/**
+ * @brief Vertex format for lit geometry: position + normal + UV + tangent.
+ *
+ * Stride = 48 bytes.  The tangent w-component stores the bitangent sign
+ * (+1 or -1) as per the glTF 2.0 convention.
+ */
 struct LitVertex {
-    f32 position[3]; ///< World-space position.
+    f32 position[3]; ///< Object-space position.
     f32 normal[3];   ///< Unit normal.
     f32 uv[2];       ///< Texture coordinates.
+    f32 tangent[4];  ///< xyz = tangent direction, w = bitangent sign (±1).
 };
 
 /** @brief A sub-range within a shared vertex/index buffer pair. */

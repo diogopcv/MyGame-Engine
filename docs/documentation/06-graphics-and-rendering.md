@@ -1,6 +1,6 @@
 # Graphics and Rendering
 
-This document covers the entire graphics subsystem: the DirectX 12 fundamentals, the Render Hardware Interface (RHI) abstraction, the render graph, mesh and material resources, model loading, the camera system, forward lighting with Blinn-Phong shading, and shadow mapping.
+This document covers the entire graphics subsystem: the DirectX 12 fundamentals, the Render Hardware Interface (RHI) abstraction, the render graph, mesh and material resources, model loading, the camera system, forward lighting (Blinn-Phong and PBR), and shadow mapping.
 
 ## Table of Contents
 
@@ -45,6 +45,16 @@ This document covers the entire graphics subsystem: the DirectX 12 fundamentals,
   - [The Shadow Pass](#the-shadow-pass)
   - [Shadow Sampling with PCF](#shadow-sampling-with-pcf)
   - [Shadow Acne and Depth Bias](#shadow-acne-and-depth-bias)
+- [PBR Materials](#pbr-materials)
+  - [Why PBR?](#why-pbr)
+  - [The Metallic-Roughness Workflow](#the-metallic-roughness-workflow)
+  - [Cook-Torrance BRDF](#cook-torrance-brdf)
+  - [PBR Root Signature](#pbr-root-signature)
+  - [Per-Material Constant Buffer](#per-material-constant-buffer)
+  - [The PBR Vertex Shader](#the-pbr-vertex-shader)
+  - [The PBR Pixel Shader](#the-pbr-pixel-shader)
+  - [Tone Mapping and Gamma Correction](#tone-mapping-and-gamma-correction)
+  - [Model Transform API](#model-transform-api)
 
 ---
 
@@ -122,7 +132,9 @@ MyEngine uses a **shader-visible** CBV/SRV/UAV heap (4 MB, arena-backed) for res
 
 A root signature defines how resources are bound to shader stages. It is like a function signature for the shader: it declares what parameters (constant buffers, textures, samplers) the shader expects and where to find them.
 
-MyEngine's Phase 3 root signature has 4 slots:
+MyEngine has two root signature layouts, selected via `PipelineDesc::root_layout`:
+
+**Default layout (`RootLayout::Default`)** — 4 root parameters, used by the Blinn-Phong model pipeline, cube pipeline, and shadow pipeline:
 
 | Slot | Type | Register | Content |
 |------|------|----------|---------|
@@ -131,8 +143,22 @@ MyEngine's Phase 3 root signature has 4 slots:
 | 2 | Descriptor table | t0 | Albedo texture |
 | 3 | Descriptor table | t1 | Shadow map |
 
-Plus two static samplers:
-- **s0:** Linear wrap sampler (for albedo textures). The filter mode is configurable per pipeline — the model pipeline uses linear, others may use point.
+**PBR layout (`RootLayout::PBR`)** — 9 root parameters, used by the PBR pipeline:
+
+| Slot | Type | Register | Content |
+|------|------|----------|---------|
+| 0 | Root CBV | b0 | Per-frame (view, proj, camera, lights, shadow VP) |
+| 1 | Root CBV | b1 | Per-object (model matrix, normal matrix) |
+| 2 | Root CBV | b2 | Per-material (base color, metallic, roughness, emissive, texture flags) |
+| 3 | Descriptor table | t0 | Base color texture (sRGB) |
+| 4 | Descriptor table | t1 | Metallic-roughness texture |
+| 5 | Descriptor table | t2 | Normal map (tangent-space) |
+| 6 | Descriptor table | t3 | Occlusion texture |
+| 7 | Descriptor table | t4 | Emissive texture |
+| 8 | Descriptor table | t5 | Shadow map (comparison depth) |
+
+Both layouts share the same two static samplers:
+- **s0:** Linear wrap sampler (for material textures). Filter mode is configurable per pipeline.
 - **s1:** Comparison sampler (for shadow map PCF sampling).
 
 A **root CBV** is a constant buffer bound directly by GPU virtual address — no descriptor needed, so it is slightly faster than going through a descriptor table.
@@ -144,8 +170,10 @@ A PSO bundles all GPU state needed for rendering: vertex and pixel shaders, inpu
 DX12 requires PSOs to be created up front (not modified on the fly). This is a departure from DX11, where individual states could be changed independently. The benefit is that the GPU driver can pre-compile and optimize the entire pipeline configuration at creation time, avoiding runtime overhead.
 
 MyEngine creates PSOs at initialization:
+- **Cube pipeline:** Vertex + pixel shader for the spinning textured cube (Phase 1 fallback), no culling.
 - **Model pipeline:** Vertex + pixel shader for lit geometry (Blinn-Phong), back-face culling, depth test/write enabled, linear texture sampling.
-- **Shadow pipeline:** Vertex shader only (no pixel shader — depth-only rendering), front-face culling (to reduce shadow acne), depth bias enabled.
+- **Shadow pipeline:** Vertex shader only (no pixel shader — depth-only rendering), back-face culling, depth bias enabled.
+- **PBR pipeline:** Vertex + pixel shader for Cook-Torrance BRDF rendering (`pbr_vs.hlsl` / `pbr_ps.hlsl`), back-face culling, depth test/write enabled, linear texture sampling. Uses `RootLayout::PBR` (9 root parameters). Activated automatically when a model is loaded while the PBR shaders are present.
 
 ### Debug Layer, GPU Validation, and DRED
 
@@ -157,7 +185,7 @@ In Debug builds, MyEngine enables three DX12 debugging features:
 
 3. **DRED (Device Removed Extended Data):** When the GPU crashes ("device removed"), DRED provides breadcrumb data showing which GPU operations completed before the crash. Without DRED, a device-removed error gives no information about what went wrong.
 
-The smoke tests check that `debug_error_count() == 0` after running, ensuring the renderer produces zero DX12 validation errors.
+The debug layer also sets `SetBreakOnSeverity` for CORRUPTION (always) and ERROR (only when a debugger is attached via `IsDebuggerPresent()`). Without the debugger check, the INT3 breakpoint that fires on an error would propagate as an unhandled SEH exception in headless CTest runs, crashing the test before it can log the error message. The smoke tests check that `debug_error_count() == 0` after running, ensuring the renderer produces zero DX12 validation errors.
 
 ---
 
@@ -319,21 +347,25 @@ Execution is a simple linear walk through this array, dispatching each command t
 
 ### Vertex Format
 
-Phase 3 uses a single vertex format for all lit geometry:
+The engine uses a single vertex format for all lit geometry:
 
 ```cpp
 struct LitVertex {
-    f32 position[3];  // 12 bytes — world-space position
+    f32 position[3];  // 12 bytes — object-space position
     f32 normal[3];    // 12 bytes — unit surface normal
     f32 uv[2];        //  8 bytes — texture coordinates
+    f32 tangent[4];   // 16 bytes — xyz = tangent direction, w = bitangent sign (±1)
 };
-// Total stride: 32 bytes
+// Total stride: 48 bytes
 ```
 
-The input layout tells the GPU how to interpret this data:
+The `tangent.w` component encodes the **bitangent sign**: the bitangent is reconstructed in the shader as `cross(normal, tangent.xyz) * tangent.w`. This is the convention used by glTF 2.0 and avoids storing the redundant third vector. The Blinn-Phong and shadow pipelines declare only the first three elements in their input layouts (they ignore tangents); the PBR pipeline uses all four.
+
+The full input layout for the PBR pipeline:
 - `POSITION`: `R32G32B32_FLOAT` at offset 0
 - `NORMAL`: `R32G32B32_FLOAT` at offset 12
 - `TEXCOORD`: `R32G32_FLOAT` at offset 24
+- `TANGENT`: `R32G32B32A32_FLOAT` at offset 32
 
 ### Mesh and SubMesh
 
@@ -351,17 +383,37 @@ This design packs an entire model into two GPU buffers (one vertex, one index), 
 
 ### Materials
 
-A `Material` in Phase 3 is simple: an optional albedo texture and a base color fallback:
+`Material` stores the full glTF 2.0 PBR metallic-roughness surface description:
 
 ```cpp
 struct Material {
+    // Base colour (albedo)
     TextureHandle albedo_texture;
-    f32           base_color[4] = {1,1,1,1};
+    f32           base_color[4] = {1,1,1,1};   // RGBA multiplier
     bool          has_albedo_texture = false;
+
+    // Metallic-roughness
+    TextureHandle metallic_roughness_texture;   // G = roughness, B = metallic
+    f32           metallic_factor  = 1.0f;
+    f32           roughness_factor = 1.0f;
+    bool          has_metallic_roughness_texture = false;
+
+    // Tangent-space normal map
+    TextureHandle normal_texture;
+    bool          has_normal_texture = false;
+
+    // Ambient occlusion
+    TextureHandle occlusion_texture;            // R channel
+    bool          has_occlusion_texture = false;
+
+    // Emissive
+    TextureHandle emissive_texture;
+    f32           emissive_factor[3] = {0,0,0}; // Linear emissive scale
+    bool          has_emissive_texture = false;
 };
 ```
 
-If the model has a texture, `has_albedo_texture` is `true` and the albedo texture is bound for rendering. Otherwise, the shader uses the flat base color. This will be extended in the future with PBR parameters (roughness, metalness, normal maps).
+Each texture slot is optional. When a texture is absent, the scalar factor (`base_color`, `metallic_factor`, etc.) is used directly, and the shader's texture-presence flag is `false`. At runtime the renderer substitutes default 1×1 textures (white for colour/metallic/roughness/occlusion, flat-normal `{128,128,255}` for the normal map) so all 6 texture slots in the PBR root signature are always bound with valid descriptors.
 
 ---
 
@@ -390,6 +442,8 @@ The engine uses the **cgltf** library (header-only, MIT license, vendored under 
        |
        v
   Extract vertices:      Convert cgltf accessors → LitVertex[]
+                         (position, normal, uv, tangent — defaults to {1,0,0,1}
+                          if the mesh has no TANGENT attribute)
   Extract indices:       Convert cgltf accessors → u32[]
        |
        v
@@ -399,9 +453,13 @@ The engine uses the **cgltf** library (header-only, MIT license, vendored under 
        v
   Load textures:         stb_image to decode PNG/JPG → RGBA8 pixels
                          rhi.create_texture(pixel_data)
+                         (all five PBR maps: base color, metallic-roughness,
+                          normal, occlusion, emissive)
        |
        v
   Build materials:       Map cgltf material → ge::gfx::Material
+                         (copies metallic/roughness/emissive factors,
+                          texture handles, and has_*_texture flags)
        |
        v
   Build sub-meshes:      Map cgltf mesh primitives → ge::gfx::SubMesh[]
@@ -676,4 +734,152 @@ shadow_pipeline.depth_bias               = 1000;   // Constant bias (in depth un
 shadow_pipeline.slope_scaled_depth_bias  = 1.0f;   // Scale with surface slope
 ```
 
-The slope-scaled component is critical: surfaces at steep angles (where acne is worst) get more bias. Combined with front-face culling in the shadow pass (so the back faces of objects cast shadows, not the front faces), this effectively eliminates shadow acne in practice.
+The slope-scaled component is critical: surfaces at steep angles (where acne is worst) get more bias. Combined with back-face culling in the shadow pass (so back faces cast shadows, pushing the depth away from the front surface), this effectively eliminates shadow acne in practice.
+
+---
+
+## PBR Materials
+
+### Why PBR?
+
+Blinn-Phong is a useful approximation but it cannot reproduce metallic surfaces (which have no diffuse component and highly tinted reflections) or the roughness-driven specular broadening seen on rough dielectrics. Physically Based Rendering (PBR) replaces the empirical Blinn-Phong formula with a physically motivated microfacet model grounded in light transport theory. The same material parameters look correct under any lighting environment, including the dynamic shadow + point light setup MyEngine uses.
+
+### The Metallic-Roughness Workflow
+
+glTF 2.0 uses the **metallic-roughness workflow**:
+
+- **Base color:** The albedo of the surface. For dielectrics this is the diffuse colour; for metals it is the colour of the specular reflection.
+- **Metallic (0–1):** 0 = dielectric (plastic, stone, skin), 1 = metal (gold, iron). Metals have no diffuse component and their F0 (Fresnel reflectance at normal incidence) is taken from the base colour. Dielectrics have an achromatic F0 ≈ 0.04.
+- **Roughness (0–1):** 0 = perfectly smooth mirror, 1 = fully diffuse. Controls the width of the specular highlight via the GGX NDF.
+
+These three parameters can come from scalar constants, textures, or a product of both. The **metallic-roughness texture** packs roughness into the G channel and metallic into the B channel (R channel is unused).
+
+### Cook-Torrance BRDF
+
+The PBR pixel shader evaluates the Cook-Torrance microfacet specular BRDF for each light:
+
+```
+f = f_diffuse + f_specular
+
+f_diffuse  = kD * albedo / π          kD = (1 - F) * (1 - metallic)
+f_specular = (D * G * F) / (4 * NdotV * NdotL + ε)
+```
+
+**D — GGX/Trowbridge-Reitz Normal Distribution Function:** Describes the statistical distribution of microfacet orientations. A rougher surface has a wider NDF, broadening the specular highlight.
+
+```hlsl
+float D_GGX(float NdotH, float roughness) {
+    float a  = roughness * roughness;
+    float a2 = a * a;
+    float d  = NdotH * NdotH * (a2 - 1.0) + 1.0;
+    return a2 / max(PI * d * d, 1e-7);
+}
+```
+
+**G — Smith Height-Correlated Masking-Shadowing (Schlick approximation):** Accounts for microfacets blocking each other's visibility (masking from the camera side, shadowing from the light side).
+
+```hlsl
+float G_Smith_Schlick(float NdotV, float NdotL, float roughness) {
+    float r  = roughness + 1.0;
+    float k  = (r * r) / 8.0;
+    float gv = NdotV / (NdotV * (1.0 - k) + k);
+    float gl = NdotL / (NdotL * (1.0 - k) + k);
+    return gv * gl;
+}
+```
+
+**F — Schlick Fresnel:** The fraction of light reflected vs. refracted at the surface. At grazing angles (HdotV → 0) the Fresnel term approaches 1, producing the bright rim highlight seen on all real surfaces.
+
+```hlsl
+float3 F_Schlick(float HdotV, float3 F0) {
+    return F0 + (1.0 - F0) * pow(saturate(1.0 - HdotV), 5.0);
+}
+```
+
+F0 is the surface's reflectance at normal incidence: `lerp(0.04, base_color, metallic)`.
+
+### PBR Root Signature
+
+The PBR pipeline uses `RootLayout::PBR` (9 root parameters). See the [Root Signatures](#root-signatures) section for the full binding table. The key addition is **slot 2 (b2)**, the per-material constant buffer, which carries material scalars and texture-presence flags that let the shader avoid sampling missing textures.
+
+### Per-Material Constant Buffer
+
+```hlsl
+cbuffer PerMaterial : register(b2) {
+    float4 base_color_factor;    // RGBA multiplier applied to base colour
+    float  metallic_factor;      // Multiplied with MR texture B channel
+    float  roughness_factor;     // Multiplied with MR texture G channel
+    float2 _pad;
+    float3 emissive_factor;      // Linear emissive scale
+    float  has_normal_tex;       // 1.0 if a normal map is bound
+    float  has_mr_tex;           // 1.0 if a metallic-roughness map is bound
+    float  has_occlusion_tex;
+    float  has_emissive_tex;
+    float  has_base_color_tex;
+};  // 64 bytes
+```
+
+Boolean flags are stored as `float` (0.0 / 1.0) to avoid HLSL constant-buffer packing edge cases. The flags are set once when the model loads (`create_pbr_material_cbs`) and never change.
+
+### The PBR Vertex Shader
+
+`pbr_vs.hlsl` reads all four vertex attributes and outputs a full TBN frame in world space:
+
+```hlsl
+output.world_pos  = mul(float4(input.position, 1.0), model).xyz;
+output.normal     = normalize(mul(input.normal,   (float3x3)normal_matrix));
+output.tangent    = normalize(mul(input.tangent.xyz, (float3x3)normal_matrix));
+output.bitangent  = cross(output.normal, output.tangent) * input.tangent.w;
+```
+
+The tangent and bitangent are world-space vectors that form the columns of the TBN matrix used in the pixel shader for normal mapping.
+
+### The PBR Pixel Shader
+
+`pbr_ps.hlsl` evaluates the full BRDF for every light and accumulates the result:
+
+1. **TBN construction:** Normalize interpolated N, T, B vectors (interpolation can denormalize them).
+2. **Normal mapping:** If `has_normal_tex`, sample the normal map, unpack from [0,1] to [-1,1], and rotate into world space via `T * nx + B * ny + N * nz`.
+3. **Surface parameters:** Sample and scale base colour (sRGB → linear), metallic, roughness. Sample AO if present.
+4. **Ambient term:** `0.03 * base_color * ao` — simple constant approximation of indirect illumination.
+5. **Directional light:** Evaluate Cook-Torrance BRDF, multiply by shadow factor from PCF shadow map.
+6. **Point lights:** Evaluate Cook-Torrance BRDF for each active light, attenuated by `(1 - dist/radius)^2`.
+7. **Emissive:** Add `emissive_factor * srgb_to_linear(emissive_tex)`.
+8. **Tone map + gamma:** Apply Reinhard tone mapping and γ correction (see next section).
+
+### Tone Mapping and Gamma Correction
+
+The PBR BRDF operates in linear light space and can produce values well above 1.0, especially on metallic surfaces under strong lights. Tone mapping compresses the high-dynamic-range result into the [0, 1] range suitable for an 8-bit display:
+
+```hlsl
+// Reinhard tone mapping
+result = result / (result + 1.0);
+
+// Gamma correction: linear → sRGB (approximate with pow 1/2.2)
+result = pow(max(result, 0.0), 1.0 / 2.2);
+```
+
+The render target format is `R8G8B8A8_UNORM` (not `_SRGB`), so gamma correction must be applied explicitly in the shader. Input textures that are authored in sRGB space (base colour, emissive) are converted to linear before any math via `pow(c, 2.2)`.
+
+### Model Transform API
+
+```cpp
+// Set the model-to-world matrix for the currently loaded model.
+// For pure rotations the normal matrix equals the rotation itself
+// (inverse-transpose of an orthogonal matrix is the matrix itself).
+void Renderer::set_model_transform(const mat4& transform);
+```
+
+Call `set_model_transform` each frame before `begin_frame` to animate the model. The transform is passed to the shadow pass, PBR pass, and Blinn-Phong pass via the per-object constant buffer. The renderer starts with `mat4_identity()` and keeps the last transform set — there is no automatic reset.
+
+**Example — Y-axis rotation:**
+
+```cpp
+float time = 0.0f;
+while (running) {
+    time += dt;
+    renderer.set_model_transform(mat4_rotation_y(time));
+    renderer.begin_frame(dt);
+    renderer.end_frame();
+}
+```

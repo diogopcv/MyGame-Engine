@@ -70,14 +70,15 @@ static bool dx_check(HRESULT hr, const char* what) {
 
 static DXGI_FORMAT to_dxgi_format(Format fmt) {
     switch (fmt) {
-        case Format::R8G8B8A8_UNORM:     return DXGI_FORMAT_R8G8B8A8_UNORM;
-        case Format::R32G32_FLOAT:       return DXGI_FORMAT_R32G32_FLOAT;
-        case Format::R32G32B32_FLOAT:    return DXGI_FORMAT_R32G32B32_FLOAT;
-        case Format::R32G32B32A32_FLOAT: return DXGI_FORMAT_R32G32B32A32_FLOAT;
-        case Format::D32_FLOAT:          return DXGI_FORMAT_D32_FLOAT;
-        case Format::R16_UINT:           return DXGI_FORMAT_R16_UINT;
-        case Format::R32_UINT:           return DXGI_FORMAT_R32_UINT;
-        default:                         return DXGI_FORMAT_UNKNOWN;
+        case Format::R8G8B8A8_UNORM:      return DXGI_FORMAT_R8G8B8A8_UNORM;
+        case Format::R8G8B8A8_UNORM_SRGB: return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+        case Format::R32G32_FLOAT:        return DXGI_FORMAT_R32G32_FLOAT;
+        case Format::R32G32B32_FLOAT:     return DXGI_FORMAT_R32G32B32_FLOAT;
+        case Format::R32G32B32A32_FLOAT:  return DXGI_FORMAT_R32G32B32A32_FLOAT;
+        case Format::D32_FLOAT:           return DXGI_FORMAT_D32_FLOAT;
+        case Format::R16_UINT:            return DXGI_FORMAT_R16_UINT;
+        case Format::R32_UINT:            return DXGI_FORMAT_R32_UINT;
+        default:                          return DXGI_FORMAT_UNKNOWN;
     }
 }
 
@@ -326,7 +327,10 @@ bool RhiDevice::init(const RhiDeviceDesc& desc) {
     if (desc.enable_debug_layer) {
         if (SUCCEEDED(impl->device.As(&impl->info_queue))) {
             impl->info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, TRUE);
-            impl->info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, TRUE);
+            // Gate ERROR break on debugger presence: INT3 without a debugger attached
+            // becomes an unhandled SEH exception that crashes headless test runners.
+            if (::IsDebuggerPresent())
+                impl->info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, TRUE);
         }
     }
 
@@ -711,52 +715,14 @@ PipelineHandle RhiDevice::create_pipeline(const PipelineDesc& desc) {
         return {};
     }
 
-    // Build root signature: 2 root CBVs (b0, b1) + 2 descriptor tables (SRVs t0, t1)
-    // + 2 static samplers (s0 linear wrap, s1 comparison for shadows)
-    D3D12_DESCRIPTOR_RANGE srv_range0{};
-    srv_range0.RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    srv_range0.NumDescriptors                    = 1;
-    srv_range0.BaseShaderRegister                = 0;
-    srv_range0.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-
-    D3D12_DESCRIPTOR_RANGE srv_range1{};
-    srv_range1.RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    srv_range1.NumDescriptors                    = 1;
-    srv_range1.BaseShaderRegister                = 1;
-    srv_range1.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-
-    D3D12_ROOT_PARAMETER root_params[4]{};
-    // Slot 0: per-frame CBV (b0)
-    root_params[0].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    root_params[0].Descriptor.ShaderRegister = 0;
-    root_params[0].Descriptor.RegisterSpace  = 0;
-    root_params[0].ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
-
-    // Slot 1: per-object CBV (b1)
-    root_params[1].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    root_params[1].Descriptor.ShaderRegister = 1;
-    root_params[1].Descriptor.RegisterSpace  = 0;
-    root_params[1].ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
-
-    // Slot 2: SRV t0 (albedo texture)
-    root_params[2].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    root_params[2].DescriptorTable.NumDescriptorRanges = 1;
-    root_params[2].DescriptorTable.pDescriptorRanges   = &srv_range0;
-    root_params[2].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
-
-    // Slot 3: SRV t1 (shadow map)
-    root_params[3].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    root_params[3].DescriptorTable.NumDescriptorRanges = 1;
-    root_params[3].DescriptorTable.pDescriptorRanges   = &srv_range1;
-    root_params[3].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
-
-    D3D12_STATIC_SAMPLER_DESC samplers[2]{};
-    // s0: filter mode driven by PipelineDesc::sampler_filter
+    // -- Shared static samplers (s0 = linear wrap, s1 = comparison for shadows) ----
     D3D12_FILTER s0_filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
     if (desc.sampler_filter == FilterMode::Linear)
         s0_filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     else if (desc.sampler_filter == FilterMode::Anisotropic)
         s0_filter = D3D12_FILTER_ANISOTROPIC;
+
+    D3D12_STATIC_SAMPLER_DESC samplers[2]{};
     samplers[0].Filter           = s0_filter;
     samplers[0].AddressU         = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
     samplers[0].AddressV         = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
@@ -765,7 +731,6 @@ PipelineHandle RhiDevice::create_pipeline(const PipelineDesc& desc) {
     samplers[0].ShaderRegister   = 0;
     samplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
-    // s1: comparison sampler (shadow mapping)
     samplers[1].Filter           = D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
     samplers[1].AddressU         = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
     samplers[1].AddressV         = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
@@ -776,11 +741,71 @@ PipelineHandle RhiDevice::create_pipeline(const PipelineDesc& desc) {
     samplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     D3D12_ROOT_SIGNATURE_DESC rs_desc{};
-    rs_desc.NumParameters     = _countof(root_params);
-    rs_desc.pParameters       = root_params;
     rs_desc.NumStaticSamplers = _countof(samplers);
     rs_desc.pStaticSamplers   = samplers;
     rs_desc.Flags             = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    // -- Root parameters: Default layout (2 CBVs + 2 SRV tables) ----------------
+    D3D12_DESCRIPTOR_RANGE default_srv_ranges[2]{};
+    default_srv_ranges[0].RangeType          = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    default_srv_ranges[0].NumDescriptors     = 1;
+    default_srv_ranges[0].BaseShaderRegister = 0;
+    default_srv_ranges[0].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    default_srv_ranges[1].RangeType          = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    default_srv_ranges[1].NumDescriptors     = 1;
+    default_srv_ranges[1].BaseShaderRegister = 1;
+    default_srv_ranges[1].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+    D3D12_ROOT_PARAMETER default_params[4]{};
+    default_params[0].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    default_params[0].Descriptor.ShaderRegister = 0;
+    default_params[0].ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
+    default_params[1].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    default_params[1].Descriptor.ShaderRegister = 1;
+    default_params[1].ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
+    default_params[2].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    default_params[2].DescriptorTable.NumDescriptorRanges = 1;
+    default_params[2].DescriptorTable.pDescriptorRanges   = &default_srv_ranges[0];
+    default_params[2].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+    default_params[3].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    default_params[3].DescriptorTable.NumDescriptorRanges = 1;
+    default_params[3].DescriptorTable.pDescriptorRanges   = &default_srv_ranges[1];
+    default_params[3].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+
+    // -- Root parameters: PBR layout (3 CBVs + 6 SRV tables) --------------------
+    // Slots 0-2: CBV b0 (per-frame), b1 (per-object), b2 (per-material)
+    // Slots 3-8: SRV t0 (base_color), t1 (metallic_roughness), t2 (normal),
+    //                 t3 (occlusion), t4 (emissive), t5 (shadow_map)
+    D3D12_DESCRIPTOR_RANGE pbr_srv_ranges[6]{};
+    for (u32 r = 0; r < 6; ++r) {
+        pbr_srv_ranges[r].RangeType          = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        pbr_srv_ranges[r].NumDescriptors     = 1;
+        pbr_srv_ranges[r].BaseShaderRegister = r;
+        pbr_srv_ranges[r].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+    }
+
+    D3D12_ROOT_PARAMETER pbr_params[9]{};
+    for (u32 c = 0; c < 3; ++c) {
+        pbr_params[c].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
+        pbr_params[c].Descriptor.ShaderRegister = c;
+        pbr_params[c].Descriptor.RegisterSpace  = 0;
+        pbr_params[c].ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
+    }
+    for (u32 s = 0; s < 6; ++s) {
+        pbr_params[3 + s].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        pbr_params[3 + s].DescriptorTable.NumDescriptorRanges = 1;
+        pbr_params[3 + s].DescriptorTable.pDescriptorRanges   = &pbr_srv_ranges[s];
+        pbr_params[3 + s].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+    }
+
+    if (desc.root_layout == RootLayout::PBR) {
+        rs_desc.NumParameters = _countof(pbr_params);
+        rs_desc.pParameters   = pbr_params;
+    } else {
+        rs_desc.NumParameters = _countof(default_params);
+        rs_desc.pParameters   = default_params;
+    }
 
     ComPtr<ID3DBlob> sig_blob, err_blob;
     HRESULT hr = D3D12SerializeRootSignature(&rs_desc, D3D_ROOT_SIGNATURE_VERSION_1,
@@ -1165,6 +1190,7 @@ u32 RhiDevice::debug_error_count() const {
         auto* message = reinterpret_cast<D3D12_MESSAGE*>(buffer.data());
         impl->info_queue->GetMessage(i, message, &msg_len);
         if (message->Severity <= D3D12_MESSAGE_SEVERITY_ERROR) {
+            GE_ERROR("D3D12 [{}]: {}", i, message->pDescription);
             ++count;
         }
     }

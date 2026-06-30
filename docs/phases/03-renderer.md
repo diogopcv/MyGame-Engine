@@ -319,3 +319,68 @@ Per `plan.md`:
 
 - Phase 1 (DX12 device, swapchain, command infrastructure)
 - Phase 2 (Handle<T>, HandleTable, Allocator, Arena, containers, job system)
+
+---
+
+## Phase 3 Addendum — PBR Materials (2026-06-29)
+
+> Status: **Complete**
+
+### Motivation
+
+The DamagedHelmet.glb reference model exposes the full glTF 2.0 PBR
+metallic-roughness workflow. Blinn-Phong cannot represent metallic surfaces or
+roughness-driven reflections correctly. PBR replaces (or co-exists alongside) the
+Blinn-Phong path so the renderer can display physically plausible materials.
+
+### What changes
+
+| Area | Change |
+|------|--------|
+| Vertex format | Add `tangent[4]` (xyz + bitangent sign) to `LitVertex` → stride 48 bytes |
+| Material struct | Add metallic_roughness, normal, occlusion, emissive texture handles + scalar factors |
+| Root signature | New `RootLayout::PBR` option in `PipelineDesc` — 3 CBVs + 6 SRV descriptor tables |
+| Model loader | Extract tangents; load all five PBR texture maps from cgltf |
+| Shaders | `pbr_vs.hlsl` outputs world-space TBN frame; `pbr_ps.hlsl` — Cook-Torrance BRDF with GGX/D, Smith/G, Schlick/F |
+| Renderer | PBR pipeline replaces Blinn-Phong for loaded models; per-material CB for scalar factors + texture-presence flags; default 1×1 white/flat-normal textures for missing maps |
+| Model transform | `Renderer::set_model_transform(const mat4&)` added — sets model-to-world matrix used by shadow, PBR, and Blinn-Phong passes (normal matrix = transform for pure rotations) |
+| Tone mapping | Reinhard tone map + gamma correction (pow 1/2.2) applied at end of PBR PS |
+| Debug layer fix | `SetBreakOnSeverity(ERROR)` now gated on `IsDebuggerPresent()` — prevents the D3D12 INT3 breakpoint from crashing headless CTest runs as an unhandled SEH exception |
+
+### Binding table — PBR root signature
+
+| Root param | Type | Register | Content |
+|------------|------|----------|---------|
+| 0 | CBV | b0 | Per-frame (view, proj, camera, lights, shadow VP) |
+| 1 | CBV | b1 | Per-object (model matrix, normal matrix) |
+| 2 | CBV | b2 | Per-material (base color, metallic, roughness, emissive, texture flags) |
+| 3 | Descriptor table | t0 | Base color texture (sRGB, linearised in PS) |
+| 4 | Descriptor table | t1 | Metallic-roughness (G=roughness, B=metallic) |
+| 5 | Descriptor table | t2 | Normal map (tangent-space) |
+| 6 | Descriptor table | t3 | Occlusion (R channel) |
+| 7 | Descriptor table | t4 | Emissive (RGB, sRGB, linearised in PS) |
+| 8 | Descriptor table | t5 | Shadow map (comparison depth) |
+
+Static samplers: s0 = linear wrap, s1 = comparison (shadow PCF). Unchanged.
+
+### BRDF
+
+Cook-Torrance microfacet specular BRDF:
+
+```
+f_specular = (D_GGX * G_Smith_Schlick * F_Schlick) / (4 * NdotV * NdotL + ε)
+f_diffuse  = kD * albedo / π       where kD = (1 - F) * (1 - metallic)
+F0         = lerp(0.04, base_color, metallic)
+```
+
+### Test
+
+Dedicated smoke test `"DX12 renderer: PBR DamagedHelmet rotates 5 seconds, no debug errors"` in `engine/gfx/tests/test_smoke.cpp`:
+- Loads `assets/models/DamagedHelmet.glb` (14 556 verts, 46 356 indices, all 5 PBR maps)
+- Camera at `{0, 0, -2.5}` looking at origin — full helmet visible in 640×480 window
+- White directional light (`{1,1,1}`, intensity 2.0) + white fill point light (`{1,1,1}`, intensity 0.8) from the left
+- Model rotates via `set_model_transform(mat4_rotation_y(time))` each frame
+- Runs 300 frames (fixed dt = 1/60 s, total ≈ 5 seconds)
+- Asserts `debug_error_count() == 0`
+
+Visual result: metallic visor reflection, roughness variation across surface, tangent-space normal map detail, AO darkening, emissive glow around face shield. All 3 CTest suites green, 14 gfx test cases, 0 debug errors.
