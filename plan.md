@@ -364,4 +364,16 @@ asserts — that is expected, not a gap.
   the INT3 breakpoint fires an unhandled SEH when no debugger is attached;
   gated it on `IsDebuggerPresent()` so it only fires in interactive
   debugging. All 3 CTest suites green (14 gfx test cases, 0 debug errors).
+- 2026-06-30 glTF completeness & transparency (Phase 3 addendum 2, complete):
+  closed loader-fallback and PBR-transparency gaps found in an audit.
+  Loader — node-hierarchy/instancing baking (`cgltf_node_transform_world`),
+  flat-normal generation, UV-derived tangent generation, inverse-transpose
+  normal matrices, second UV set + vertex colors, `alpha_mode`/`alpha_cutoff`/
+  `double_sided`, `normal_texture.scale`/`occlusion.strength`/
+  `KHR_materials_emissive_strength`, `KHR_texture_transform` + per-texture
+  sampler wrap. PBR — blend state in the RHI/PSO, cull×blend PSO variants,
+  alpha-test for MASK, back-to-front transparent sorting, and analytic
+  procedural environment IBL (hemispheric diffuse + Karis analytic EnvBRDF
+  specular). HDR-cubemap IBL and OIT documented as remaining gaps. See
+  `docs/phases/03-renderer.md` (Addendum 2).
 - Next up: Phase 4 — World & gameplay.

@@ -97,6 +97,15 @@ static D3D12_RESOURCE_STATES to_dx12_state(ResourceState state) {
     }
 }
 
+static D3D12_TEXTURE_ADDRESS_MODE to_dx12_address(AddressMode a) {
+    switch (a) {
+        case AddressMode::Wrap:   return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        case AddressMode::Clamp:  return D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        case AddressMode::Mirror: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR;
+        default:                  return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    }
+}
+
 static D3D12_COMPARISON_FUNC to_dx12_compare(CompareFunc f) {
     switch (f) {
         case CompareFunc::Never:        return D3D12_COMPARISON_FUNC_NEVER;
@@ -722,11 +731,12 @@ PipelineHandle RhiDevice::create_pipeline(const PipelineDesc& desc) {
     else if (desc.sampler_filter == FilterMode::Anisotropic)
         s0_filter = D3D12_FILTER_ANISOTROPIC;
 
+    const D3D12_TEXTURE_ADDRESS_MODE s0_address = to_dx12_address(desc.sampler_address);
     D3D12_STATIC_SAMPLER_DESC samplers[2]{};
     samplers[0].Filter           = s0_filter;
-    samplers[0].AddressU         = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    samplers[0].AddressV         = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    samplers[0].AddressW         = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    samplers[0].AddressU         = s0_address;
+    samplers[0].AddressV         = s0_address;
+    samplers[0].AddressW         = s0_address;
     samplers[0].ComparisonFunc   = D3D12_COMPARISON_FUNC_NEVER;
     samplers[0].ShaderRegister   = 0;
     samplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
@@ -851,18 +861,24 @@ PipelineHandle RhiDevice::create_pipeline(const PipelineDesc& desc) {
         rasterizer.SlopeScaledDepthBias = desc.slope_scaled_depth_bias;
     }
 
-    // Blend state (opaque)
+    // Blend state. AlphaBlend uses straight (non-premultiplied) alpha and
+    // forces depth-write off so transparent fragments don't occlude what's
+    // behind them; the caller sorts blended draws back-to-front.
+    const bool alpha_blend = (desc.blend_mode == BlendMode::AlphaBlend);
     D3D12_BLEND_DESC blend{};
-    blend.RenderTarget[0].BlendEnable           = FALSE;
+    blend.RenderTarget[0].BlendEnable           = alpha_blend ? TRUE : FALSE;
     blend.RenderTarget[0].LogicOpEnable         = FALSE;
-    blend.RenderTarget[0].SrcBlend              = D3D12_BLEND_ONE;
-    blend.RenderTarget[0].DestBlend             = D3D12_BLEND_ZERO;
+    blend.RenderTarget[0].SrcBlend              = alpha_blend ? D3D12_BLEND_SRC_ALPHA : D3D12_BLEND_ONE;
+    blend.RenderTarget[0].DestBlend             = alpha_blend ? D3D12_BLEND_INV_SRC_ALPHA : D3D12_BLEND_ZERO;
     blend.RenderTarget[0].BlendOp               = D3D12_BLEND_OP_ADD;
-    blend.RenderTarget[0].SrcBlendAlpha         = D3D12_BLEND_ONE;
-    blend.RenderTarget[0].DestBlendAlpha        = D3D12_BLEND_ZERO;
+    blend.RenderTarget[0].SrcBlendAlpha         = alpha_blend ? D3D12_BLEND_INV_DEST_ALPHA : D3D12_BLEND_ONE;
+    blend.RenderTarget[0].DestBlendAlpha        = D3D12_BLEND_ONE;
     blend.RenderTarget[0].BlendOpAlpha          = D3D12_BLEND_OP_ADD;
     blend.RenderTarget[0].LogicOp               = D3D12_LOGIC_OP_NOOP;
     blend.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
+    // Transparent geometry tests depth but must not write it.
+    const bool depth_write = desc.depth_write && !alpha_blend;
 
     // PSO
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pso_desc{};
@@ -873,8 +889,8 @@ PipelineHandle RhiDevice::create_pipeline(const PipelineDesc& desc) {
     pso_desc.RasterizerState       = rasterizer;
     pso_desc.BlendState            = blend;
     pso_desc.DepthStencilState.DepthEnable    = desc.depth_enable ? TRUE : FALSE;
-    pso_desc.DepthStencilState.DepthWriteMask = desc.depth_write ? D3D12_DEPTH_WRITE_MASK_ALL
-                                                                 : D3D12_DEPTH_WRITE_MASK_ZERO;
+    pso_desc.DepthStencilState.DepthWriteMask = depth_write ? D3D12_DEPTH_WRITE_MASK_ALL
+                                                            : D3D12_DEPTH_WRITE_MASK_ZERO;
     pso_desc.DepthStencilState.DepthFunc      = to_dx12_compare(desc.depth_func);
     pso_desc.DepthStencilState.StencilEnable  = FALSE;
     pso_desc.DSVFormat             = to_dxgi_format(desc.ds_format);

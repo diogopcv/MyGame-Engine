@@ -36,18 +36,25 @@ cbuffer PerObject : register(b1)
     row_major float4x4 normal_matrix;
 };
 
+// Per-texture KHR_texture_transform + UV-set selector (2 float4 = 32 bytes).
+struct TexXform
+{
+    float4 offset_scale; // xy = offset, zw = scale
+    float4 rot_uvset;    // x = rotation (rad), y = uv_set (0/1)
+};
+
 cbuffer PerMaterial : register(b2)
 {
-    float4 base_color_factor;    // RGBA multiplier
-    float  metallic_factor;
-    float  roughness_factor;
-    float2 _pad_mat0;
-    float3 emissive_factor;      // linear emissive scale
-    float  has_normal_tex;       // bool as float
-    float  has_mr_tex;
-    float  has_occlusion_tex;
-    float  has_emissive_tex;
-    float  has_base_color_tex;
+    float4   base_color_factor;  // RGBA multiplier
+    float4   mr_params;          // x=metallic y=roughness z=normal_scale w=occlusion_strength
+    float4   emissive_alpha;     // xyz=emissive factor, w=alpha_cutoff
+    float4   flags0;             // x=alpha_mode(0/1/2) y=has_base z=has_mr w=has_normal
+    float4   flags1;             // x=has_occlusion y=has_emissive
+    TexXform xform_base;
+    TexXform xform_mr;
+    TexXform xform_normal;
+    TexXform xform_occlusion;
+    TexXform xform_emissive;
 };
 
 // --- Vertex shader output (pixel shader input) --------------------------------
@@ -56,7 +63,9 @@ struct PSInput
     float4 sv_pos    : SV_Position;
     float3 world_pos : WORLD_POS;
     float3 normal    : NORMAL;
-    float2 uv        : TEXCOORD;
+    float2 uv        : TEXCOORD0;
+    float2 uv1       : TEXCOORD1;
+    float4 color     : COLOR;
     float3 tangent   : TANGENT;
     float3 bitangent : BITANGENT;
 };
@@ -65,6 +74,16 @@ struct PSInput
 float3 srgb_to_linear(float3 c)
 {
     return pow(max(c, 0.0f), 2.2f);
+}
+
+// Apply a glTF KHR_texture_transform and select the UV set.
+float2 apply_xform(float2 uv0, float2 uv1, TexXform x)
+{
+    float2 uv = (x.rot_uvset.y > 0.5f) ? uv1 : uv0;
+    float  s  = sin(x.rot_uvset.x);
+    float  c  = cos(x.rot_uvset.x);
+    float2 r  = float2(uv.x * c - uv.y * s, uv.x * s + uv.y * c); // rotate
+    return r * x.offset_scale.zw + x.offset_scale.xy;             // scale, then offset
 }
 
 // GGX/Trowbridge-Reitz normal distribution
@@ -90,6 +109,26 @@ float G_Smith_Schlick(float NdotV, float NdotL, float roughness)
 float3 F_Schlick(float HdotV, float3 F0)
 {
     return F0 + (1.0f - F0) * pow(saturate(1.0f - HdotV), 5.0f);
+}
+
+// --- Analytic environment IBL (procedural sky, no cubemap) --------------------
+static const float3 kSkyColor    = float3(0.40f, 0.50f, 0.65f);
+static const float3 kGroundColor = float3(0.18f, 0.16f, 0.14f);
+
+float3 env_sample(float3 dir)
+{
+    return lerp(kGroundColor, kSkyColor, saturate(dir.y * 0.5f + 0.5f));
+}
+
+// Karis' split-sum analytic environment BRDF approximation (no LUT).
+float3 env_brdf_approx(float3 F0, float roughness, float NoV)
+{
+    const float4 c0 = float4(-1.0f, -0.0275f, -0.572f, 0.022f);
+    const float4 c1 = float4( 1.0f,  0.0425f,  1.040f, -0.04f);
+    float4 r    = roughness * c0 + c1;
+    float  a004 = min(r.x * r.x, exp2(-9.28f * NoV)) * r.x + r.y;
+    float2 AB   = float2(-1.04f, 1.04f) * a004 + r.zw;
+    return F0 * AB.x + AB.y;
 }
 
 // 3x3 PCF shadow lookup
@@ -144,22 +183,25 @@ float3 eval_pbr(float3 N, float3 V, float3 L,
 // --- Main --------------------------------------------------------------------
 float4 main(PSInput input) : SV_Target
 {
-    // Build tangent-space basis
-    float3 N = normalize(input.normal);
-    float3 T = normalize(input.tangent);
-    float3 B = normalize(input.bitangent);
+    const float alpha_mode        = flags0.x; // 0=opaque 1=mask 2=blend
+    const float has_base_color_tex = flags0.y;
+    const float has_mr_tex         = flags0.z;
+    const float has_normal_tex     = flags0.w;
+    const float has_occlusion_tex  = flags1.x;
+    const float has_emissive_tex   = flags1.y;
 
-    if (has_normal_tex > 0.5f)
-    {
-        float3 n_ts = normal_tex.Sample(samp, input.uv).xyz * 2.0f - 1.0f;
-        N = normalize(T * n_ts.x + B * n_ts.y + N * n_ts.z);
-    }
+    // Transformed UVs per map.
+    float2 uv_base = apply_xform(input.uv, input.uv1, xform_base);
+    float2 uv_mr   = apply_xform(input.uv, input.uv1, xform_mr);
+    float2 uv_nrm  = apply_xform(input.uv, input.uv1, xform_normal);
+    float2 uv_ao   = apply_xform(input.uv, input.uv1, xform_occlusion);
+    float2 uv_em   = apply_xform(input.uv, input.uv1, xform_emissive);
 
-    // Base colour (sRGB → linear)
+    // Base colour (sRGB → linear), modulated by vertex colour.
     float4 base;
     if (has_base_color_tex > 0.5f)
     {
-        float4 s = base_color_tex.Sample(samp, input.uv);
+        float4 s = base_color_tex.Sample(samp, uv_base);
         base     = float4(srgb_to_linear(s.rgb), s.a);
     }
     else
@@ -167,30 +209,56 @@ float4 main(PSInput input) : SV_Target
         base = float4(1.0f, 1.0f, 1.0f, 1.0f);
     }
     base *= base_color_factor;
+    base *= input.color;
+
+    // Alpha test for MASK materials.
+    float alpha_cutoff = emissive_alpha.w;
+    if (alpha_mode > 0.5f && alpha_mode < 1.5f)
+        clip(base.a - alpha_cutoff);
+
+    // Build tangent-space basis
+    float3 N = normalize(input.normal);
+    float3 T = normalize(input.tangent);
+    float3 B = normalize(input.bitangent);
+
+    if (has_normal_tex > 0.5f)
+    {
+        float3 n_ts = normal_tex.Sample(samp, uv_nrm).xyz * 2.0f - 1.0f;
+        n_ts.xy *= mr_params.z; // normal_scale
+        N = normalize(T * n_ts.x + B * n_ts.y + N * n_ts.z);
+    }
 
     // Metallic / roughness
-    float metallic  = metallic_factor;
-    float roughness = roughness_factor;
+    float metallic  = mr_params.x;
+    float roughness = mr_params.y;
     if (has_mr_tex > 0.5f)
     {
-        float4 mr = mr_tex.Sample(samp, input.uv);
+        float4 mr = mr_tex.Sample(samp, uv_mr);
         roughness *= mr.g;
         metallic  *= mr.b;
     }
     roughness = clamp(roughness, 0.04f, 1.0f);
     metallic  = saturate(metallic);
 
-    // Ambient occlusion
+    // Ambient occlusion (occlusion_strength lerps between 1 and the sampled value)
     float ao = 1.0f;
     if (has_occlusion_tex > 0.5f)
-        ao = occlusion_tex.Sample(samp, input.uv).r;
+    {
+        float occ = occlusion_tex.Sample(samp, uv_ao).r;
+        ao = lerp(1.0f, occ, mr_params.w); // mr_params.w = occlusion_strength
+    }
 
-    float3 V = normalize(camera_pos - input.world_pos);
+    float3 V    = normalize(camera_pos - input.world_pos);
+    float  NdotV = saturate(dot(N, V));
 
-    // Indirect ambient (no IBL — simple approximation)
-    float3 F0_approx = lerp(float3(0.04f, 0.04f, 0.04f), base.rgb, metallic);
-    float3 ambient   = float3(0.03f, 0.03f, 0.03f) * base.rgb * ao;
-    float3 result    = ambient;
+    // Indirect (analytic environment IBL)
+    float3 F0_approx   = lerp(float3(0.04f, 0.04f, 0.04f), base.rgb, metallic);
+    float3 R           = reflect(-V, N);
+    float3 irradiance  = env_sample(N);
+    float3 diffuse_ibl = irradiance * base.rgb * (1.0f - metallic);
+    float3 specular_ibl = env_sample(R) * env_brdf_approx(F0_approx, roughness, NdotV);
+    float3 ambient     = (diffuse_ibl + specular_ibl) * ao;
+    float3 result      = ambient;
 
     // Directional light (sun)
     float shadow = (shadow_enabled > 0.5f) ? calc_shadow(input.world_pos) : 1.0f;
@@ -218,9 +286,9 @@ float4 main(PSInput input) : SV_Target
     }
 
     // Emissive (sRGB → linear, then multiply by factor)
-    float3 emissive = emissive_factor;
+    float3 emissive = emissive_alpha.xyz;
     if (has_emissive_tex > 0.5f)
-        emissive *= srgb_to_linear(emissive_tex.Sample(samp, input.uv).rgb);
+        emissive *= srgb_to_linear(emissive_tex.Sample(samp, uv_em).rgb);
     result += emissive;
 
     // Reinhard tone mapping

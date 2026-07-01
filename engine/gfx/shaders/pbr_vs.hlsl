@@ -17,7 +17,9 @@ struct VSInput
 {
     float3 position : POSITION;
     float3 normal   : NORMAL;
-    float2 uv       : TEXCOORD;
+    float2 uv       : TEXCOORD0;
+    float2 uv1      : TEXCOORD1;
+    float4 color    : COLOR;
     float4 tangent  : TANGENT;  // xyz = tangent direction, w = bitangent sign
 };
 
@@ -26,7 +28,9 @@ struct VSOutput
     float4 sv_pos    : SV_Position;
     float3 world_pos : WORLD_POS;
     float3 normal    : NORMAL;
-    float2 uv        : TEXCOORD;
+    float2 uv        : TEXCOORD0;
+    float2 uv1       : TEXCOORD1;
+    float4 color     : COLOR;
     float3 tangent   : TANGENT;
     float3 bitangent : BITANGENT;
 };
@@ -39,6 +43,8 @@ VSOutput main(VSInput input)
     o.world_pos = world_pos.xyz;
     o.sv_pos    = mul(mul(world_pos, view), proj);
     o.uv        = input.uv;
+    o.uv1       = input.uv1;
+    o.color     = input.color;
 
     float3x3 nm3 = (float3x3)normal_matrix;
     o.normal    = normalize(mul(input.normal,      nm3));

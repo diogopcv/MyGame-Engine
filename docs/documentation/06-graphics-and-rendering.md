@@ -1,6 +1,6 @@
 # Graphics and Rendering
 
-This document covers the entire graphics subsystem: the DirectX 12 fundamentals, the Render Hardware Interface (RHI) abstraction, the render graph, mesh and material resources, model loading, the camera system, forward lighting (Blinn-Phong and PBR), and shadow mapping.
+This document covers the entire graphics subsystem: the DirectX 12 fundamentals, the Render Hardware Interface (RHI) abstraction, the render graph, mesh and material resources, model loading, the camera system, forward lighting (Blinn-Phong and PBR), shadow mapping, transparency, and analytic environment lighting (IBL).
 
 ## Table of Contents
 
@@ -30,6 +30,9 @@ This document covers the entire graphics subsystem: the DirectX 12 fundamentals,
 - [Model Loading (`model_loader.h`)](#model-loading-model_loaderh)
   - [The glTF Format](#the-gltf-format)
   - [The Loading Pipeline](#the-loading-pipeline)
+  - [Scene-Graph Baking and Instancing](#scene-graph-baking-and-instancing)
+  - [Fallbacks for Missing Attributes](#fallbacks-for-missing-attributes)
+  - [Material Feature Coverage](#material-feature-coverage)
 - [Camera System (`camera.h`)](#camera-system-camerah)
   - [Camera Representation](#camera-representation)
   - [Fly-Through Controller](#fly-through-controller)
@@ -53,8 +56,14 @@ This document covers the entire graphics subsystem: the DirectX 12 fundamentals,
   - [Per-Material Constant Buffer](#per-material-constant-buffer)
   - [The PBR Vertex Shader](#the-pbr-vertex-shader)
   - [The PBR Pixel Shader](#the-pbr-pixel-shader)
+  - [Analytic Environment Lighting (IBL)](#analytic-environment-lighting-ibl)
   - [Tone Mapping and Gamma Correction](#tone-mapping-and-gamma-correction)
   - [Model Transform API](#model-transform-api)
+- [Transparency](#transparency)
+  - [Alpha Modes](#alpha-modes)
+  - [Blend State and PSO Variants](#blend-state-and-pso-variants)
+  - [Back-to-Front Sorting](#back-to-front-sorting)
+  - [Double-Sided Materials](#double-sided-materials)
 
 ---
 
@@ -149,7 +158,7 @@ MyEngine has two root signature layouts, selected via `PipelineDesc::root_layout
 |------|------|----------|---------|
 | 0 | Root CBV | b0 | Per-frame (view, proj, camera, lights, shadow VP) |
 | 1 | Root CBV | b1 | Per-object (model matrix, normal matrix) |
-| 2 | Root CBV | b2 | Per-material (base color, metallic, roughness, emissive, texture flags) |
+| 2 | Root CBV | b2 | Per-material (base color, metallic, roughness, emissive, alpha mode/cutoff, texture flags, per-map UV transforms) |
 | 3 | Descriptor table | t0 | Base color texture (sRGB) |
 | 4 | Descriptor table | t1 | Metallic-roughness texture |
 | 5 | Descriptor table | t2 | Normal map (tangent-space) |
@@ -158,7 +167,7 @@ MyEngine has two root signature layouts, selected via `PipelineDesc::root_layout
 | 8 | Descriptor table | t5 | Shadow map (comparison depth) |
 
 Both layouts share the same two static samplers:
-- **s0:** Linear wrap sampler (for material textures). Filter mode is configurable per pipeline.
+- **s0:** Sampler for material textures. Both the **filter mode** (point / linear / anisotropic) and the **address mode** (wrap / clamp / mirror) are configurable per pipeline via `PipelineDesc::sampler_filter` and `PipelineDesc::sampler_address`. The PBR pipeline picks the address mode from the loaded model's dominant glTF sampler wrap mode (rebuilding its PSOs at load time if it differs).
 - **s1:** Comparison sampler (for shadow map PCF sampling).
 
 A **root CBV** is a constant buffer bound directly by GPU virtual address — no descriptor needed, so it is slightly faster than going through a descriptor table.
@@ -173,7 +182,7 @@ MyEngine creates PSOs at initialization:
 - **Cube pipeline:** Vertex + pixel shader for the spinning textured cube (Phase 1 fallback), no culling.
 - **Model pipeline:** Vertex + pixel shader for lit geometry (Blinn-Phong), back-face culling, depth test/write enabled, linear texture sampling.
 - **Shadow pipeline:** Vertex shader only (no pixel shader — depth-only rendering), back-face culling, depth bias enabled.
-- **PBR pipeline:** Vertex + pixel shader for Cook-Torrance BRDF rendering (`pbr_vs.hlsl` / `pbr_ps.hlsl`), back-face culling, depth test/write enabled, linear texture sampling. Uses `RootLayout::PBR` (9 root parameters). Activated automatically when a model is loaded while the PBR shaders are present.
+- **PBR pipelines:** Vertex + pixel shader for Cook-Torrance BRDF rendering (`pbr_vs.hlsl` / `pbr_ps.hlsl`), depth test/write enabled, linear texture sampling, `RootLayout::PBR` (9 root parameters). Because cull mode and blend state are baked into the PSO, the renderer builds a **2×2 matrix of variants** — `{cull Back, cull None} × {Opaque, AlphaBlend}` — and selects one per sub-mesh from the material's `double_sided` and `alpha_mode`. Activated automatically when a model is loaded while the PBR shaders are present. See [Transparency](#transparency).
 
 ### Debug Layer, GPU Validation, and DRED
 
@@ -258,7 +267,8 @@ All RHI types are plain data — no OS or DX12 headers leak through. This file d
 - **Format enum:** Pixel/vertex element formats (`R8G8B8A8_UNORM`, `D32_FLOAT`, etc.).
 - **Usage enums:** How a buffer or texture will be used (`Vertex`, `Index`, `Constant`, `ShaderResource`, `DepthStencil`, etc.).
 - **ResourceState enum:** For barrier transitions (`RenderTarget`, `PixelShaderResource`, `DepthWrite`, `Present`, etc.).
-- **Descriptor structs:** `BufferDesc`, `TextureDesc`, `ShaderDesc`, `PipelineDesc` — all the parameters needed to create a resource.
+- **State enums:** `CullMode`, `FillMode`, `CompareFunc`, `FilterMode`, `AddressMode` (wrap/clamp/mirror), and `BlendMode` (`Opaque`, `AlphaBlend`).
+- **Descriptor structs:** `BufferDesc`, `TextureDesc`, `ShaderDesc`, `PipelineDesc` — all the parameters needed to create a resource. `PipelineDesc` carries `blend_mode` and `sampler_address` alongside the shader/state fields.
 
 ---
 
@@ -351,21 +361,27 @@ The engine uses a single vertex format for all lit geometry:
 
 ```cpp
 struct LitVertex {
-    f32 position[3];  // 12 bytes — object-space position
-    f32 normal[3];    // 12 bytes — unit surface normal
-    f32 uv[2];        //  8 bytes — texture coordinates
-    f32 tangent[4];   // 16 bytes — xyz = tangent direction, w = bitangent sign (±1)
+    f32 position[3];             // 12 bytes — object-space position           (offset 0)
+    f32 normal[3];               // 12 bytes — unit surface normal             (offset 12)
+    f32 uv[2];                   //  8 bytes — texture coordinates, set 0      (offset 24)
+    f32 uv1[2]   = {0,0};        //  8 bytes — texture coordinates, set 1      (offset 32)
+    f32 color[4] = {1,1,1,1};    // 16 bytes — vertex colour (glTF COLOR_0)    (offset 40)
+    f32 tangent[4];              // 16 bytes — xyz = tangent, w = bitangent sign (offset 56)
 };
-// Total stride: 48 bytes
+// Total stride: 72 bytes
 ```
 
-The `tangent.w` component encodes the **bitangent sign**: the bitangent is reconstructed in the shader as `cross(normal, tangent.xyz) * tangent.w`. This is the convention used by glTF 2.0 and avoids storing the redundant third vector. The Blinn-Phong and shadow pipelines declare only the first three elements in their input layouts (they ignore tangents); the PBR pipeline uses all four.
+Two UV sets are carried so a material can reference either `TEXCOORD_0` or `TEXCOORD_1` per texture (common for ambient-occlusion / lightmap channels). `color` holds the optional glTF `COLOR_0` vertex colour, defaulting to white so it is a harmless multiply when absent.
 
-The full input layout for the PBR pipeline:
-- `POSITION`: `R32G32B32_FLOAT` at offset 0
-- `NORMAL`: `R32G32B32_FLOAT` at offset 12
-- `TEXCOORD`: `R32G32_FLOAT` at offset 24
-- `TANGENT`: `R32G32B32A32_FLOAT` at offset 32
+The `tangent.w` component encodes the **bitangent sign**: the bitangent is reconstructed in the shader as `cross(normal, tangent.xyz) * tangent.w`. This is the convention used by glTF 2.0 and avoids storing the redundant third vector.
+
+The Blinn-Phong and shadow pipelines declare only the first three elements in their input layouts (`position`/`normal`/`uv` at offsets 0/12/24) — those offsets are deliberately fixed so growing the vertex did not disturb them. Only the PBR pipeline declares the full layout:
+- `POSITION`  : `R32G32B32_FLOAT`   at offset 0
+- `NORMAL`    : `R32G32B32_FLOAT`   at offset 12
+- `TEXCOORD0` : `R32G32_FLOAT`      at offset 24
+- `TEXCOORD1` : `R32G32_FLOAT`      at offset 32
+- `COLOR`     : `R32G32B32A32_FLOAT`at offset 40
+- `TANGENT`   : `R32G32B32A32_FLOAT`at offset 56
 
 ### Mesh and SubMesh
 
@@ -379,41 +395,65 @@ SubMesh 0: index_offset=0,  index_count=6,  base_vertex=0,  material=0
 SubMesh 1: index_offset=6,  index_count=6,  base_vertex=4,  material=1
 ```
 
-This design packs an entire model into two GPU buffers (one vertex, one index), minimizing buffer-binding changes during rendering. Each submesh can reference a different material.
+This design packs an entire model into two GPU buffers (one vertex, one index), minimizing buffer-binding changes during rendering. Each submesh can reference a different material. Each `SubMesh` also stores an object-space **`centroid[3]`**, computed at load time from its baked vertex positions, which the renderer uses to sort transparent sub-meshes back-to-front (see [Back-to-Front Sorting](#back-to-front-sorting)).
 
 ### Materials
 
 `Material` stores the full glTF 2.0 PBR metallic-roughness surface description:
 
 ```cpp
+enum class AlphaMode : u8 { Opaque, Mask, Blend };
+
+// KHR_texture_transform + UV-set selector, stored per texture map.
+struct TexTransform {
+    f32 offset[2] = {0,0};
+    f32 scale[2]  = {1,1};
+    f32 rotation  = 0.0f;   // radians
+    u32 uv_set    = 0;      // 0 → TEXCOORD_0, 1 → TEXCOORD_1
+};
+
 struct Material {
     // Base colour (albedo)
     TextureHandle albedo_texture;
     f32           base_color[4] = {1,1,1,1};   // RGBA multiplier
     bool          has_albedo_texture = false;
+    TexTransform  albedo_xform;
 
     // Metallic-roughness
     TextureHandle metallic_roughness_texture;   // G = roughness, B = metallic
     f32           metallic_factor  = 1.0f;
     f32           roughness_factor = 1.0f;
     bool          has_metallic_roughness_texture = false;
+    TexTransform  mr_xform;
 
     // Tangent-space normal map
     TextureHandle normal_texture;
     bool          has_normal_texture = false;
+    f32           normal_scale = 1.0f;          // glTF normalTexture.scale
+    TexTransform  normal_xform;
 
     // Ambient occlusion
     TextureHandle occlusion_texture;            // R channel
     bool          has_occlusion_texture = false;
+    f32           occlusion_strength = 1.0f;    // glTF occlusionTexture.strength
+    TexTransform  occlusion_xform;
 
-    // Emissive
+    // Emissive (KHR_materials_emissive_strength folded into the factor)
     TextureHandle emissive_texture;
     f32           emissive_factor[3] = {0,0,0}; // Linear emissive scale
     bool          has_emissive_texture = false;
+    TexTransform  emissive_xform;
+
+    // Transparency / culling
+    AlphaMode     alpha_mode   = AlphaMode::Opaque;
+    f32           alpha_cutoff = 0.5f;          // threshold for AlphaMode::Mask
+    bool          double_sided = false;
 };
 ```
 
 Each texture slot is optional. When a texture is absent, the scalar factor (`base_color`, `metallic_factor`, etc.) is used directly, and the shader's texture-presence flag is `false`. At runtime the renderer substitutes default 1×1 textures (white for colour/metallic/roughness/occlusion, flat-normal `{128,128,255}` for the normal map) so all 6 texture slots in the PBR root signature are always bound with valid descriptors.
+
+Each map additionally carries a `TexTransform`: a glTF `KHR_texture_transform` (UV offset/rotation/scale) plus a `uv_set` selector that chooses between the vertex's two UV channels. `normal_scale`, `occlusion_strength`, and the emissive strength are read from the glTF material and applied in the pixel shader. `alpha_mode`, `alpha_cutoff`, and `double_sided` drive the transparency path (see [Transparency](#transparency)).
 
 ---
 
@@ -441,9 +481,23 @@ The engine uses the **cgltf** library (header-only, MIT license, vendored under 
   cgltf_load_buffers()   Load embedded buffer data
        |
        v
+  Load textures:         stb_image to decode PNG/JPG → RGBA8 pixels
+                         rhi.create_texture(pixel_data)
+       |
+       v
+  Build materials:       Map cgltf material → ge::gfx::Material
+                         (factors, texture handles + transforms/UV sets,
+                          alpha mode/cutoff, double-sided, normal scale,
+                          occlusion strength, emissive strength)
+       |
+       v
+  Flatten scene graph:   Walk nodes → (mesh, world-transform) instances
+       |
+       v
   Extract vertices:      Convert cgltf accessors → LitVertex[]
-                         (position, normal, uv, tangent — defaults to {1,0,0,1}
-                          if the mesh has no TANGENT attribute)
+                         (position, normal, uv0, uv1, color, tangent;
+                          GENERATE normals / tangents when absent;
+                          BAKE the node world transform into each vertex)
   Extract indices:       Convert cgltf accessors → u32[]
        |
        v
@@ -451,24 +505,47 @@ The engine uses the **cgltf** library (header-only, MIT license, vendored under 
                          rhi.create_buffer(index_data)
        |
        v
-  Load textures:         stb_image to decode PNG/JPG → RGBA8 pixels
-                         rhi.create_texture(pixel_data)
-                         (all five PBR maps: base color, metallic-roughness,
-                          normal, occlusion, emissive)
+  Build sub-meshes:      Map primitives → ge::gfx::SubMesh[] (+ centroid)
        |
        v
-  Build materials:       Map cgltf material → ge::gfx::Material
-                         (copies metallic/roughness/emissive factors,
-                          texture handles, and has_*_texture flags)
-       |
-       v
-  Build sub-meshes:      Map cgltf mesh primitives → ge::gfx::SubMesh[]
-       |
-       v
-  Return Model struct    (mesh + materials + textures)
+  Return Model struct    (mesh + materials + textures + sampler mode)
 ```
 
-The loader merges all mesh primitives into a single pair of vertex/index buffers for efficiency. Each primitive becomes a `SubMesh` with its offset, count, and material index.
+The loader merges all mesh primitives — across every instanced node — into a single pair of vertex/index buffers for efficiency. Each primitive instance becomes a `SubMesh` with its offset, count, material index, and centroid.
+
+### Scene-Graph Baking and Instancing
+
+glTF positions geometry through a **node hierarchy**: a mesh is placed in the world by the accumulated transform of the node that references it, and one mesh can be referenced by several nodes. The loader honours this by flattening the graph into a list of `(mesh, world-matrix)` instances via `cgltf_node_transform_world`, then baking each instance's world transform directly into its vertices:
+
+- **Positions** are transformed by the node's world matrix.
+- **Normals and tangents** are transformed by the **inverse-transpose** of the world matrix, so non-uniform node scale does not distort them.
+
+A mesh referenced by N nodes is emitted N times at its N world positions. If no node references any mesh (a degenerate file), the loader falls back to baking every mesh at identity. cgltf writes world matrices column-major; copying element `arr[i*4+j]` into our row-major `mat4[i][j]` yields the transpose, which is exactly the row-vector matrix the engine needs.
+
+### Fallbacks for Missing Attributes
+
+glTF makes several vertex attributes optional. The loader synthesizes anything a primitive omits so downstream shading is always well-defined:
+
+| Missing | Fallback |
+|---------|----------|
+| **Indices** | Sequential `0,1,2,…` generated per primitive |
+| **Normals** | Area-weighted normals accumulated from triangle face normals, then normalized |
+| **Tangents** | Derived from positions + UVs (Lengyel's method), orthonormalized against the normal (Gram-Schmidt) with a computed handedness sign. If the primitive also lacks UVs, a stable `{1,0,0,1}` frame is used |
+| **UV set 1 / vertex colour** | `uv1` defaults to `(0,0)`; `color` defaults to white `(1,1,1,1)` |
+| **Materials** | A single default `Material` (white dielectric) is created |
+
+### Material Feature Coverage
+
+Beyond the base metallic-roughness factors and the five texture maps, the loader reads:
+
+- **`alpha_mode`** (OPAQUE / MASK / BLEND) and **`alpha_cutoff`**.
+- **`double_sided`** — disables back-face culling for that material.
+- **`normal_texture.scale`** and **`occlusion_texture.strength`**.
+- **`KHR_materials_emissive_strength`** — multiplied into the emissive factor at load.
+- **`KHR_texture_transform`** and the per-texture **UV-set index** for every map.
+- The dominant glTF **sampler wrap mode** (from the base-colour texture's sampler), stored on the `Model` and used to configure the PBR static sampler.
+
+Textures are decoded to RGBA8; base-colour and emissive maps are authored in sRGB and linearised in the shader, while metallic-roughness, normal, and occlusion maps are treated as linear data.
 
 ---
 
@@ -521,7 +598,7 @@ The controller uses the camera's own forward and right vectors for movement, so 
 
 In forward rendering, each object is drawn once (or once per light), and the lighting calculation happens in the pixel shader during the draw call. This is the simplest rendering approach and is efficient for scenes with few lights.
 
-The alternative is deferred rendering, where geometry and surface properties are written to a set of "G-buffers" in a first pass, and lighting is applied in a screen-space second pass. Deferred is better for many lights but has higher memory cost and cannot easily handle transparent objects. MyEngine uses forward rendering for Phase 3.
+The alternative is deferred rendering, where geometry and surface properties are written to a set of "G-buffers" in a first pass, and lighting is applied in a screen-space second pass. Deferred is better for many lights but has higher memory cost and cannot easily handle transparent objects. MyEngine uses forward rendering, which handles transparency naturally — see the [Transparency](#transparency) section for the alpha-blend path.
 
 ### The Blinn-Phong Lighting Model
 
@@ -805,47 +882,90 @@ The PBR pipeline uses `RootLayout::PBR` (9 root parameters). See the [Root Signa
 ### Per-Material Constant Buffer
 
 ```hlsl
+struct TexXform {                // per-map KHR_texture_transform + UV set
+    float4 offset_scale;         // xy = offset, zw = scale
+    float4 rot_uvset;            // x = rotation (rad), y = uv_set (0/1)
+};
+
 cbuffer PerMaterial : register(b2) {
-    float4 base_color_factor;    // RGBA multiplier applied to base colour
-    float  metallic_factor;      // Multiplied with MR texture B channel
-    float  roughness_factor;     // Multiplied with MR texture G channel
-    float2 _pad;
-    float3 emissive_factor;      // Linear emissive scale
-    float  has_normal_tex;       // 1.0 if a normal map is bound
-    float  has_mr_tex;           // 1.0 if a metallic-roughness map is bound
-    float  has_occlusion_tex;
-    float  has_emissive_tex;
-    float  has_base_color_tex;
-};  // 64 bytes
+    float4   base_color_factor;  // RGBA multiplier applied to base colour
+    float4   mr_params;          // x=metallic y=roughness z=normal_scale w=occlusion_strength
+    float4   emissive_alpha;     // xyz = emissive factor, w = alpha_cutoff
+    float4   flags0;             // x=alpha_mode(0/1/2) y=has_base z=has_mr w=has_normal
+    float4   flags1;             // x=has_occlusion y=has_emissive
+    TexXform xform_base;
+    TexXform xform_mr;
+    TexXform xform_normal;
+    TexXform xform_occlusion;
+    TexXform xform_emissive;
+};  // 240 bytes (fits the 256-byte constant buffer)
 ```
 
-Boolean flags are stored as `float` (0.0 / 1.0) to avoid HLSL constant-buffer packing edge cases. The flags are set once when the model loads (`create_pbr_material_cbs`) and never change.
+Scalars are packed into `float4` rows to respect HLSL's 16-byte cbuffer alignment, and boolean texture-presence flags are stored as `float` (0.0 / 1.0). `alpha_mode` is a float enum (0 = opaque, 1 = mask, 2 = blend). Each of the five maps carries its own `TexXform` so the pixel shader can transform and UV-select per texture. The whole buffer is filled once when the model loads (`create_pbr_material_cbs`) and never changes.
 
 ### The PBR Vertex Shader
 
-`pbr_vs.hlsl` reads all four vertex attributes and outputs a full TBN frame in world space:
+`pbr_vs.hlsl` reads all six vertex attributes, passes both UV sets and the vertex colour through, and outputs a full TBN frame in world space:
 
 ```hlsl
 output.world_pos  = mul(float4(input.position, 1.0), model).xyz;
 output.normal     = normalize(mul(input.normal,   (float3x3)normal_matrix));
 output.tangent    = normalize(mul(input.tangent.xyz, (float3x3)normal_matrix));
 output.bitangent  = cross(output.normal, output.tangent) * input.tangent.w;
+output.uv         = input.uv;    // TEXCOORD0
+output.uv1        = input.uv1;   // TEXCOORD1
+output.color      = input.color; // COLOR_0
 ```
 
-The tangent and bitangent are world-space vectors that form the columns of the TBN matrix used in the pixel shader for normal mapping.
+The tangent and bitangent are world-space vectors that form the columns of the TBN matrix used in the pixel shader for normal mapping. Because the model's world transform is baked into the vertex data at load time, `model` and `normal_matrix` here carry only the per-frame `set_model_transform` value (identity by default).
 
 ### The PBR Pixel Shader
 
 `pbr_ps.hlsl` evaluates the full BRDF for every light and accumulates the result:
 
-1. **TBN construction:** Normalize interpolated N, T, B vectors (interpolation can denormalize them).
-2. **Normal mapping:** If `has_normal_tex`, sample the normal map, unpack from [0,1] to [-1,1], and rotate into world space via `T * nx + B * ny + N * nz`.
-3. **Surface parameters:** Sample and scale base colour (sRGB → linear), metallic, roughness. Sample AO if present.
-4. **Ambient term:** `0.03 * base_color * ao` — simple constant approximation of indirect illumination.
-5. **Directional light:** Evaluate Cook-Torrance BRDF, multiply by shadow factor from PCF shadow map.
-6. **Point lights:** Evaluate Cook-Torrance BRDF for each active light, attenuated by `(1 - dist/radius)^2`.
-7. **Emissive:** Add `emissive_factor * srgb_to_linear(emissive_tex)`.
-8. **Tone map + gamma:** Apply Reinhard tone mapping and γ correction (see next section).
+1. **UV preparation:** For each map, select UV set 0 or 1 and apply its `KHR_texture_transform` (rotate, scale, offset) via `apply_xform`.
+2. **Base colour:** Sample (sRGB → linear), multiply by `base_color_factor` **and the interpolated vertex colour**.
+3. **Alpha test:** For MASK materials, `clip(base.a - alpha_cutoff)` discards sub-cutoff fragments.
+4. **Normal mapping:** If `has_normal_tex`, sample the normal map, unpack to [-1,1], scale the XY by `normal_scale`, and rotate into world space via `T * nx + B * ny + N * nz`.
+5. **Surface parameters:** Sample metallic/roughness (clamped); sample AO and lerp with `occlusion_strength`.
+6. **Ambient / IBL:** Analytic environment lighting replaces the old flat constant — see [Analytic Environment Lighting (IBL)](#analytic-environment-lighting-ibl).
+7. **Directional light:** Evaluate Cook-Torrance BRDF, multiply by shadow factor from PCF shadow map.
+8. **Point lights:** Evaluate Cook-Torrance BRDF for each active light, attenuated by `(1 - dist/radius)^2`.
+9. **Emissive:** Add `emissive_factor * srgb_to_linear(emissive_tex)`.
+10. **Tone map + gamma:** Apply Reinhard tone mapping and γ correction (see the Tone Mapping section).
+
+The pixel shader outputs `base.a` in the alpha channel, which the blend state consumes for transparent draws.
+
+### Analytic Environment Lighting (IBL)
+
+Direct lights alone leave PBR surfaces looking wrong: a **metal** has no diffuse term, so away from a direct highlight it reflects only its surroundings — with no environment it renders nearly black. Real engines solve this with **image-based lighting (IBL)**: a prefiltered environment cubemap supplies both diffuse irradiance and glossy reflections.
+
+MyEngine ships an **analytic, procedural** environment model that captures the important behaviour without an HDR asset or an offline prefilter pass:
+
+- **Environment function** — a simple hemispheric sky↔ground gradient sampled by direction:
+
+  ```hlsl
+  float3 env_sample(float3 dir) {
+      return lerp(kGroundColor, kSkyColor, saturate(dir.y * 0.5 + 0.5));
+  }
+  ```
+
+- **Diffuse IBL** — irradiance from the surface normal, tinted by albedo, removed for metals:
+
+  ```hlsl
+  float3 diffuse_ibl = env_sample(N) * base.rgb * (1.0 - metallic);
+  ```
+
+- **Specular IBL** — the reflection-vector environment colour weighted by **Karis' split-sum analytic `EnvBRDFApprox`**, a curve fit that reproduces the environment BRDF (scale + bias on F0) with **no BRDF LUT**:
+
+  ```hlsl
+  float3 R = reflect(-V, N);
+  float3 specular_ibl = env_sample(R) * env_brdf_approx(F0, roughness, NdotV);
+  ```
+
+- Both terms are modulated by ambient occlusion: `ambient = (diffuse_ibl + specular_ibl) * ao`.
+
+This gives metals visible, roughness-aware reflections and keeps shadowed areas plausibly lit, at the cost of a couple of `lerp`s per pixel. **True HDR-cubemap IBL** (equirect/cubemap load → prefiltered radiance mips + irradiance map + BRDF LUT) is documented as future work; the analytic model is the stand-in until an environment asset and the offline prefilter pass exist.
 
 ### Tone Mapping and Gamma Correction
 
@@ -883,3 +1003,44 @@ while (running) {
     renderer.end_frame();
 }
 ```
+
+---
+
+## Transparency
+
+Forward rendering handles transparent surfaces naturally: a blended fragment is composited over whatever is already in the frame buffer during its own draw call. MyEngine implements the full glTF 2.0 alpha pipeline on the PBR path.
+
+### Alpha Modes
+
+Each material declares one of three glTF alpha modes, read into `Material::alpha_mode`:
+
+- **`Opaque`** — alpha is ignored; the surface is fully opaque.
+- **`Mask`** — alpha-tested. The pixel shader runs `clip(base.a - alpha_cutoff)`, discarding fragments below the cutoff. This gives crisp cut-outs (foliage, chain-link) with no blending and no sort dependency, so masked geometry is drawn with the opaque set.
+- **`Blend`** — order-dependent alpha blending. The fragment is composited using its alpha as coverage.
+
+### Blend State and PSO Variants
+
+Blend state and cull mode are baked into the pipeline object, so the renderer builds a **2×2 matrix of PBR PSOs** and picks one per sub-mesh:
+
+```
+                Opaque blend        AlphaBlend
+ cull Back      opaque/masked       one-sided transparent
+ cull None      double-sided opaque double-sided transparent
+```
+
+The `AlphaBlend` variant uses straight (non-premultiplied) alpha — `SrcBlend = SRC_ALPHA`, `DestBlend = INV_SRC_ALPHA` — and **forces depth-write off** so a transparent surface never occludes what is behind it, while still depth-**testing** against opaque geometry drawn earlier.
+
+### Back-to-Front Sorting
+
+Alpha blending is order-dependent: `over` compositing is not commutative, so transparent surfaces must be drawn far-to-near. Each frame the PBR pass:
+
+1. Partitions sub-meshes into an **opaque/masked** list and a **blended** list.
+2. Draws the opaque/masked list first (depth write on), laying down the depth buffer.
+3. Sorts the blended list by **view-space centroid depth** — each `SubMesh` centroid is transformed by `model_transform * view` and sorted on the resulting `z` (far first).
+4. Draws the blended list back-to-front.
+
+This is correct for the single-model, convex-ish case the renderer targets today. Order-independent transparency (OIT) and per-triangle sorting are noted as future work; a full scene-wide transparent sort arrives with the world/scene layer.
+
+### Double-Sided Materials
+
+Thin transparent surfaces (glass, leaves, cloth) need both faces shaded. When `Material::double_sided` is set, the renderer selects the **cull-None** PSO variant for that sub-mesh so back faces are not discarded. Single-sided materials keep back-face culling for efficiency.

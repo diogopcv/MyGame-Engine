@@ -12,6 +12,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <algorithm>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -58,20 +59,32 @@ struct GpuShadowCB {
     mat4 light_view_proj;
 };
 
+// Per-texture KHR_texture_transform + UV-set selector (2 float4 = 32 bytes).
+struct GpuTexXform {
+    f32 offset_scale[4]; // xy = offset, zw = scale
+    f32 rot_uvset[4];    // x = rotation (rad), y = uv_set (0/1), zw = pad
+};
+
 // Must match PerMaterial cbuffer in pbr_ps.hlsl exactly.
 struct GpuPerMaterialCB {
-    f32 base_color_factor[4];  //  0-15
-    f32 metallic_factor;       // 16
-    f32 roughness_factor;      // 20
-    f32 _pad[2];               // 24
-    f32 emissive_factor[3];    // 32
-    f32 has_normal_tex;        // 44
-    f32 has_mr_tex;            // 48
-    f32 has_occlusion_tex;     // 52
-    f32 has_emissive_tex;      // 56
-    f32 has_base_color_tex;    // 60
-};                             // Total: 64 bytes
-static_assert(sizeof(GpuPerMaterialCB) == 64);
+    f32 base_color_factor[4]; // RGBA multiplier
+    f32 mr_params[4];         // x=metallic y=roughness z=normal_scale w=occlusion_strength
+    f32 emissive_alpha[4];    // xyz=emissive factor, w=alpha_cutoff
+    f32 flags0[4];            // x=alpha_mode(0/1/2) y=has_base z=has_mr w=has_normal
+    f32 flags1[4];            // x=has_occlusion y=has_emissive zw=pad
+    GpuTexXform xform_base;
+    GpuTexXform xform_mr;
+    GpuTexXform xform_normal;
+    GpuTexXform xform_occlusion;
+    GpuTexXform xform_emissive;
+};                            // Total: 80 + 160 = 240 bytes
+static_assert(sizeof(GpuPerMaterialCB) == 240);
+
+/// Normal matrix for a model transform: transpose(inverse(M)). For a pure
+/// rotation this equals M; it stays correct under non-uniform scale.
+static mat4 normal_matrix_of(const mat4& m) {
+    return transpose(inverse(m));
+}
 
 constexpr u32 kPerFrameCBSize    = 512; // >= sizeof(GpuPerFrameCB), 256-aligned
 constexpr u32 kPerObjectCBSize   = 256;
@@ -136,12 +149,19 @@ struct RendererImpl {
     // PBR resources
     ShaderHandle   pbr_vs;
     ShaderHandle   pbr_ps;
-    PipelineHandle pbr_pipeline;
+    // PSO variants: [cull: 0=Back, 1=None] x [blend: 0=Opaque, 1=AlphaBlend].
+    PipelineHandle pbr_psos[2][2];
+    AddressMode    pbr_sampler_address = AddressMode::Wrap;
     TextureHandle  default_white_tex;  ///< 1×1 white fallback for missing PBR maps.
     TextureHandle  default_normal_tex; ///< 1×1 flat normal {128,128,255}.
     BufferHandle   per_material_cbs[kMaxPbrMaterials];
     u32            per_material_cb_count = 0;
     bool           has_pbr_model = false;
+
+    bool pbr_ready() const { return pbr_psos[0][0].is_valid(); }
+    PipelineHandle pbr_pso(bool double_sided, bool blend) const {
+        return pbr_psos[double_sided ? 1 : 0][blend ? 1 : 0];
+    }
 
     // Scene state (set by user, read each frame)
     Camera           camera;
@@ -323,6 +343,50 @@ struct RendererImpl {
         return true;
     }
 
+    /// Build the 2x2 PBR PSO variant matrix for a given static-sampler address
+    /// mode. Destroys any previously built variants first (load-time rebuild).
+    bool build_pbr_psos(AddressMode address) {
+        for (auto& row : pbr_psos)
+            for (auto& p : row)
+                if (p.is_valid()) { rhi.destroy_pipeline(p); p = {}; }
+
+        InputElement input_elements[] = {
+            {"POSITION", 0, Format::R32G32B32_FLOAT,    0},
+            {"NORMAL",   0, Format::R32G32B32_FLOAT,   12},
+            {"TEXCOORD", 0, Format::R32G32_FLOAT,       24},
+            {"TEXCOORD", 1, Format::R32G32_FLOAT,       32},
+            {"COLOR",    0, Format::R32G32B32A32_FLOAT, 40},
+            {"TANGENT",  0, Format::R32G32B32A32_FLOAT, 56},
+        };
+
+        const CullMode  culls[2]  = {CullMode::Back, CullMode::None};
+        const BlendMode blends[2] = {BlendMode::Opaque, BlendMode::AlphaBlend};
+
+        for (u32 c = 0; c < 2; ++c) {
+            for (u32 b = 0; b < 2; ++b) {
+                PipelineDesc pipe_desc{};
+                pipe_desc.vertex_shader       = pbr_vs;
+                pipe_desc.pixel_shader        = pbr_ps;
+                pipe_desc.input_elements      = input_elements;
+                pipe_desc.input_element_count = 6;
+                pipe_desc.input_stride        = sizeof(LitVertex);
+                pipe_desc.cull_mode           = culls[c];
+                pipe_desc.depth_enable        = true;
+                pipe_desc.depth_func          = CompareFunc::Less;
+                pipe_desc.rt_format           = Format::R8G8B8A8_UNORM;
+                pipe_desc.ds_format           = Format::D32_FLOAT;
+                pipe_desc.sampler_filter      = FilterMode::Linear;
+                pipe_desc.sampler_address     = address;
+                pipe_desc.blend_mode          = blends[b];
+                pipe_desc.root_layout         = RootLayout::PBR;
+                pbr_psos[c][b] = rhi.create_pipeline(pipe_desc);
+                if (!pbr_psos[c][b].is_valid()) return false;
+            }
+        }
+        pbr_sampler_address = address;
+        return true;
+    }
+
     bool create_pbr_pipeline() {
         std::vector<u8> vs_bytecode = load_shader_bytecode(L"pbr_vs.cso");
         std::vector<u8> ps_bytecode = load_shader_bytecode(L"pbr_ps.cso");
@@ -332,28 +396,7 @@ struct RendererImpl {
         pbr_ps = rhi.create_shader({ps_bytecode.data(), static_cast<u32>(ps_bytecode.size())});
         if (!pbr_vs.is_valid() || !pbr_ps.is_valid()) return false;
 
-        InputElement input_elements[] = {
-            {"POSITION", 0, Format::R32G32B32_FLOAT,    0},
-            {"NORMAL",   0, Format::R32G32B32_FLOAT,   12},
-            {"TEXCOORD", 0, Format::R32G32_FLOAT,       24},
-            {"TANGENT",  0, Format::R32G32B32A32_FLOAT, 32},
-        };
-
-        PipelineDesc pipe_desc{};
-        pipe_desc.vertex_shader       = pbr_vs;
-        pipe_desc.pixel_shader        = pbr_ps;
-        pipe_desc.input_elements      = input_elements;
-        pipe_desc.input_element_count = 4;
-        pipe_desc.input_stride        = sizeof(LitVertex);
-        pipe_desc.cull_mode           = CullMode::Back;
-        pipe_desc.depth_enable        = true;
-        pipe_desc.depth_func          = CompareFunc::Less;
-        pipe_desc.rt_format           = Format::R8G8B8A8_UNORM;
-        pipe_desc.ds_format           = Format::D32_FLOAT;
-        pipe_desc.sampler_filter      = FilterMode::Linear;
-        pipe_desc.root_layout         = RootLayout::PBR;
-        pbr_pipeline = rhi.create_pipeline(pipe_desc);
-        if (!pbr_pipeline.is_valid()) return false;
+        if (!build_pbr_psos(AddressMode::Wrap)) return false;
 
         // Default 1×1 textures for missing PBR maps
         const u8 white_px[4]  = {255, 255, 255, 255};
@@ -398,21 +441,39 @@ struct RendererImpl {
             if (!per_material_cbs[i].is_valid()) return false;
 
             const Material& mat = loaded_model.materials[i];
+
+            auto fill_xform = [](GpuTexXform& g, const TexTransform& x) {
+                g.offset_scale[0] = x.offset[0]; g.offset_scale[1] = x.offset[1];
+                g.offset_scale[2] = x.scale[0];  g.offset_scale[3] = x.scale[1];
+                g.rot_uvset[0]    = x.rotation;
+                g.rot_uvset[1]    = static_cast<f32>(x.uv_set);
+                g.rot_uvset[2]    = 0.0f; g.rot_uvset[3] = 0.0f;
+            };
+
             GpuPerMaterialCB cb{};
             cb.base_color_factor[0] = mat.base_color[0];
             cb.base_color_factor[1] = mat.base_color[1];
             cb.base_color_factor[2] = mat.base_color[2];
             cb.base_color_factor[3] = mat.base_color[3];
-            cb.metallic_factor      = mat.metallic_factor;
-            cb.roughness_factor     = mat.roughness_factor;
-            cb.emissive_factor[0]   = mat.emissive_factor[0];
-            cb.emissive_factor[1]   = mat.emissive_factor[1];
-            cb.emissive_factor[2]   = mat.emissive_factor[2];
-            cb.has_normal_tex       = mat.has_normal_texture ? 1.0f : 0.0f;
-            cb.has_mr_tex           = mat.has_metallic_roughness_texture ? 1.0f : 0.0f;
-            cb.has_occlusion_tex    = mat.has_occlusion_texture ? 1.0f : 0.0f;
-            cb.has_emissive_tex     = mat.has_emissive_texture ? 1.0f : 0.0f;
-            cb.has_base_color_tex   = mat.has_albedo_texture ? 1.0f : 0.0f;
+            cb.mr_params[0]         = mat.metallic_factor;
+            cb.mr_params[1]         = mat.roughness_factor;
+            cb.mr_params[2]         = mat.normal_scale;
+            cb.mr_params[3]         = mat.occlusion_strength;
+            cb.emissive_alpha[0]    = mat.emissive_factor[0];
+            cb.emissive_alpha[1]    = mat.emissive_factor[1];
+            cb.emissive_alpha[2]    = mat.emissive_factor[2];
+            cb.emissive_alpha[3]    = mat.alpha_cutoff;
+            cb.flags0[0]            = static_cast<f32>(static_cast<u32>(mat.alpha_mode));
+            cb.flags0[1]            = mat.has_albedo_texture ? 1.0f : 0.0f;
+            cb.flags0[2]            = mat.has_metallic_roughness_texture ? 1.0f : 0.0f;
+            cb.flags0[3]            = mat.has_normal_texture ? 1.0f : 0.0f;
+            cb.flags1[0]            = mat.has_occlusion_texture ? 1.0f : 0.0f;
+            cb.flags1[1]            = mat.has_emissive_texture ? 1.0f : 0.0f;
+            fill_xform(cb.xform_base,      mat.albedo_xform);
+            fill_xform(cb.xform_mr,        mat.mr_xform);
+            fill_xform(cb.xform_normal,    mat.normal_xform);
+            fill_xform(cb.xform_occlusion, mat.occlusion_xform);
+            fill_xform(cb.xform_emissive,  mat.emissive_xform);
 
             void* mapped = rhi.map_buffer(per_material_cbs[i]);
             if (mapped) std::memcpy(mapped, &cb, sizeof(cb));
@@ -636,35 +697,39 @@ static void pbr_pass_execute(RhiDevice& rhi, void* user_data) {
     void* fm = rhi.map_buffer(impl->per_frame_cb[fi]);
     if (fm) std::memcpy(fm, &frame_cb, sizeof(frame_cb));
 
-    // Per-object CB (model transform set via set_model_transform)
+    // Per-object CB (model transform set via set_model_transform).
+    // Normal matrix is the inverse-transpose so non-uniform scale stays correct.
     GpuPerObjectCB obj_cb{};
     obj_cb.model         = impl->model_transform;
-    obj_cb.normal_matrix = impl->model_transform; // pure rotation: inverse-transpose = itself
+    obj_cb.normal_matrix = normal_matrix_of(impl->model_transform);
     void* om = rhi.map_buffer(impl->per_object_cb[fi]);
     if (om) std::memcpy(om, &obj_cb, sizeof(obj_cb));
 
     const f32 w = static_cast<f32>(rhi.width());
     const f32 h = static_cast<f32>(rhi.height());
 
-    rhi.set_pipeline(impl->pbr_pipeline);
-    rhi.set_constant_buffer(0, impl->per_frame_cb[fi]);
-    rhi.set_constant_buffer(1, impl->per_object_cb[fi]);
+    // IA / RS state is independent of the PSO and persists across pipeline changes.
     rhi.set_viewport(0, 0, w, h, 0, 1);
     rhi.set_scissor(0, 0, rhi.width(), rhi.height());
     rhi.set_vertex_buffer(impl->loaded_model.mesh.vertex_buffer, sizeof(LitVertex));
     rhi.set_index_buffer(impl->loaded_model.mesh.index_buffer, Format::R32_UINT);
 
     const Mesh& mesh = impl->loaded_model.mesh;
-    for (u32 si = 0; si < mesh.sub_mesh_count; ++si) {
+
+    // Each PBR PSO variant owns its own root signature, so all root arguments
+    // (CBVs + texture tables) are re-bound for every draw.
+    auto draw_submesh = [&](u32 si) {
         const SubMesh& sub = mesh.sub_meshes[si];
         const u32 mat_idx  = (sub.material_index < impl->per_material_cb_count)
                              ? sub.material_index : 0;
         const Material& mat = impl->loaded_model.materials[mat_idx];
+        const bool blend = (mat.alpha_mode == AlphaMode::Blend);
 
-        // Per-material CB  (slot 2)
+        rhi.set_pipeline(impl->pbr_pso(mat.double_sided, blend));
+        rhi.set_constant_buffer(0, impl->per_frame_cb[fi]);
+        rhi.set_constant_buffer(1, impl->per_object_cb[fi]);
         rhi.set_constant_buffer(2, impl->per_material_cbs[mat_idx]);
 
-        // PBR texture maps (slots 3–8)
         rhi.set_texture(3, mat.has_albedo_texture
                            ? mat.albedo_texture : impl->default_white_tex);
         rhi.set_texture(4, mat.has_metallic_roughness_texture
@@ -675,13 +740,37 @@ static void pbr_pass_execute(RhiDevice& rhi, void* user_data) {
                            ? mat.occlusion_texture : impl->default_white_tex);
         rhi.set_texture(7, mat.has_emissive_texture
                            ? mat.emissive_texture : impl->default_white_tex);
-        if (impl->has_shadows)
-            rhi.set_texture(8, impl->shadow_map);
-        else
-            rhi.set_texture(8, impl->default_white_tex); // dummy; shadow_enabled=0
+        rhi.set_texture(8, impl->has_shadows ? impl->shadow_map : impl->default_white_tex);
 
         rhi.draw_indexed(sub.index_count, sub.index_offset, sub.base_vertex);
+    };
+
+    // Partition sub-meshes into opaque/masked (drawn first) and blended.
+    std::vector<u32> opaque, transparent;
+    opaque.reserve(mesh.sub_mesh_count);
+    for (u32 si = 0; si < mesh.sub_mesh_count; ++si) {
+        const u32 mat_idx = (mesh.sub_meshes[si].material_index < impl->per_material_cb_count)
+                            ? mesh.sub_meshes[si].material_index : 0;
+        if (impl->loaded_model.materials[mat_idx].alpha_mode == AlphaMode::Blend)
+            transparent.push_back(si);
+        else
+            opaque.push_back(si);
     }
+
+    // Sort blended sub-meshes far→near by view-space centroid depth.
+    if (transparent.size() > 1) {
+        const mat4 mv = impl->model_transform * impl->camera.view_matrix();
+        auto view_z = [&](u32 si) {
+            const f32* c = mesh.sub_meshes[si].centroid;
+            vec4 p = vec4{c[0], c[1], c[2], 1.0f} * mv;
+            return p.z;
+        };
+        std::sort(transparent.begin(), transparent.end(),
+                  [&](u32 a, u32 b) { return view_z(a) > view_z(b); });
+    }
+
+    for (u32 si : opaque)      draw_submesh(si);
+    for (u32 si : transparent) draw_submesh(si);
 }
 
 // -- Renderer implementation ------------------------------------------------
@@ -763,7 +852,13 @@ bool Renderer::load_model(const char* path, ge::Allocator alloc) {
 
     impl->has_model = true;
 
-    if (impl->pbr_pipeline.is_valid()) {
+    if (impl->pbr_ready()) {
+        // Rebuild the PBR PSO variants if this model needs a different static
+        // sampler wrap mode than the ones currently built.
+        if (impl->loaded_model.sampler_address != impl->pbr_sampler_address) {
+            if (!impl->build_pbr_psos(impl->loaded_model.sampler_address))
+                GE_WARN("Failed to rebuild PBR PSOs for the model's sampler wrap mode");
+        }
         if (impl->create_pbr_material_cbs()) {
             impl->has_pbr_model = true;
         } else {
@@ -809,7 +904,7 @@ void Renderer::begin_frame(float dt) {
     impl->graph.import(bb, ResourceState::Present);
     impl->graph.import(db, ResourceState::DepthWrite);
 
-    if (impl->has_model && impl->has_pbr_model && impl->pbr_pipeline.is_valid()) {
+    if (impl->has_model && impl->has_pbr_model && impl->pbr_ready()) {
         // PBR render path
         if (impl->has_shadows) {
             impl->graph.import(impl->shadow_map, ResourceState::DepthWrite);

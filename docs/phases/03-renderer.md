@@ -384,3 +384,96 @@ Dedicated smoke test `"DX12 renderer: PBR DamagedHelmet rotates 5 seconds, no de
 - Asserts `debug_error_count() == 0`
 
 Visual result: metallic visor reflection, roughness variation across surface, tangent-space normal map detail, AO darkening, emissive glow around face shield. All 3 CTest suites green, 14 gfx test cases, 0 debug errors.
+
+---
+
+## Phase 3 Addendum 2 — glTF completeness & transparency (2026-06-30)
+
+> Status: **Complete**
+
+### Motivation
+
+An audit of the glTF loader and the PBR path found (a) several missing
+fallbacks for absent glTF fields that silently produce wrong output, and
+(b) a complete absence of transparency support plus a few unimplemented PBR
+material features. This addendum closes those gaps so the renderer correctly
+handles arbitrary glTF 2.0 assets, not just the single-node, fully-attributed
+DamagedHelmet reference.
+
+### Audit findings being addressed
+
+**Missing-field fallbacks (correctness):**
+
+| # | Gap | Fix |
+|---|-----|-----|
+| 1 | Node/scene graph ignored — geometry baked in mesh-local space, multi-node models collapse to origin; a mesh used by N nodes is loaded once | Walk nodes via `cgltf_node_transform_world`; bake each (node, primitive) instance with its world matrix. Fallback to identity-per-mesh when no node references a mesh |
+| 2 | No `NORMAL` attribute → zero normals → black lighting | Generate flat per-face normals from positions when the attribute is absent |
+| 3 | Tangents only correct if the file ships `TANGENT`; constant `+X` default breaks normal mapping | Generate per-vertex tangents (Lengyel's method) from positions + UVs when absent and UVs exist; keep `+X` only when there are no UVs |
+| 4 | Non-uniform node/model scale breaks normals (normal matrix assumed = model) | Use the inverse-transpose of the upper 3×3 for normals/tangents, both in the loader bake and in `set_model_transform` |
+| 5 | Only `TEXCOORD_0` read; second UV set dropped | Add `uv1` to `LitVertex`; store a per-texture UV-set index in `Material`; shader selects uv0/uv1 per map |
+| 6 | Vertex colors (`COLOR_0`) dropped | Read `COLOR_0` (vec3/vec4) into the vertex; multiply into base color in the PS |
+| 7 | `normal_texture.scale`, `occlusion_texture.strength`, `KHR_materials_emissive_strength` ignored | Read all three into `Material`; apply scale to sampled normal XY, strength to AO lerp, emissive-strength folded into `emissive_factor` at load |
+| 8 | `KHR_texture_transform` and per-texture sampler wrap/filter ignored | Read the per-texture UV offset/rotation/scale; expose wrap/filter via new sampler address mode so the static sampler set matches the asset |
+
+**PBR feature gaps:**
+
+| # | Gap | Fix |
+|---|-----|-----|
+| 9 | No blend state anywhere — pipeline hardwired opaque | Add `BlendMode` to `PipelineDesc`; DX12 PSO honours `Opaque` / `AlphaBlend` (straight alpha, depth-test on, depth-write off) |
+| 10 | `alpha_mode` / `alpha_cutoff` never read; no alpha-test | Read `alpha_mode` (OPAQUE/MASK/BLEND) + `alpha_cutoff` into `Material`; PS `clip()`s for MASK using the cutoff |
+| 11 | No double-sided support — always back-culled | Read `double_sided`; bind a no-cull PSO variant for those materials |
+| 12 | No transparent draw ordering | Renderer splits sub-meshes into opaque + transparent; opaque drawn first, transparent sorted back-to-front by camera-space centroid depth (centroid stored per `SubMesh` at load) |
+| 13 | No environment lighting — flat `0.03` ambient, metals near-black | Analytic/procedural environment IBL: hemispheric sky↔ground irradiance for the diffuse term, Karis split-sum analytic `EnvBRDFApprox` for specular, roughness-attenuated. (HDR-cubemap-prefilter IBL remains future work — see below) |
+
+### Design notes
+
+**Pipeline variants (PBR).** Cull and blend are PSO-baked, so the renderer
+creates a 2×2 matrix of PBR PSOs: `{cull Back, cull None} × {Opaque, AlphaBlend}`.
+MASK reuses the matching Opaque PSO and discards in the shader, so no extra
+variant. A sub-mesh selects its variant from its material's
+`double_sided` and `alpha_mode`.
+
+**Draw order.** Within a frame: all `Opaque`/`Mask` sub-meshes first (depth
+write on), then `Blend` sub-meshes sorted far→near by the dot of (centroid −
+camera) with the view forward. Single-model scope for now; a full scene sort
+arrives with the world layer (Phase 4).
+
+**Vertex format change.** `LitVertex` grows to carry `uv1[2]` and `color[4]`:
+
+```
+position[3] @0 · normal[3] @12 · uv[2] @24 · uv1[2] @32 · color[4] @40 · tangent[4] @56   (stride 72)
+```
+
+The depth-only/shadow and Blinn-Phong input layouts read only the first three
+attributes, so their layouts are unchanged (offsets 0/12/24 stay put); only the
+PBR layout gains the `TEXCOORD1` / `COLOR` / shifted `TANGENT` elements.
+
+**Per-material CB** gains `alpha_cutoff`, `alpha_mode` (float enum),
+`normal_scale`, `occlusion_strength`, and per-map `uv_set` selectors + a
+`KHR_texture_transform` (offset.xy, rotation, scale.xy) block; the struct stays
+16-byte-field aligned and its `static_assert` size is updated.
+
+### Out of scope (documented remaining gaps)
+
+- **HDR-cubemap IBL** (equirect/cubemap load → prefiltered radiance mips +
+  irradiance map + BRDF LUT). The analytic environment model above stands in
+  until an HDR asset and the offline prefilter pass exist. Tracked for a later
+  graphics pass.
+- Order-independent transparency (OIT). The back-to-front sort is correct for
+  the single-model case and convex-ish meshes; true OIT is future work.
+- Cascaded/▸soft shadows for transparent receivers.
+
+### Test plan / verification
+
+- All 3 CTest suites green, 0 DX12 debug-layer errors (`ctest -C Debug`,
+  18.3 s gfx suite). The gfx suite loads `box.glb` and `DamagedHelmet.glb`
+  through the new PBR path; with the debug layer + GPU-based validation on, this
+  exercises the 72-byte vertex layout, the 240-byte per-material CB, the new
+  PBR input layout, and the rewritten `pbr_vs`/`pbr_ps` end-to-end.
+- The four PBR PSO variants (`{cull Back, None} × {Opaque, AlphaBlend}`) are
+  built at init under the debug layer, so the blend state and root-signature
+  layout are validated even though the bundled assets are opaque.
+- Remaining manual/visual verification (transparent asset, sky-IBL look) is a
+  sandbox check; a generated BLEND-material GLB fixture for an automated
+  blend-path golden image is future work alongside the Phase 11 cooker.
+

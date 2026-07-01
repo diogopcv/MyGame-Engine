@@ -120,6 +120,12 @@ enum class AddressMode : u8 {
     Mirror,
 };
 
+/** @brief Colour blend mode for a pipeline's single render target. */
+enum class BlendMode : u8 {
+    Opaque,     ///< Blending disabled; depth write follows @c PipelineDesc::depth_write.
+    AlphaBlend, ///< Straight alpha (src.a, 1-src.a); depth test on, depth write forced off.
+};
+
 // ---------------------------------------------------------------------------
 // Descriptor structs
 // ---------------------------------------------------------------------------
@@ -188,6 +194,8 @@ struct PipelineDesc {
     f32                depth_bias_clamp   = 0.0f;
     f32                slope_scaled_depth_bias = 0.0f;
     FilterMode         sampler_filter     = FilterMode::Point; ///< Static sampler s0 filter mode.
+    AddressMode        sampler_address    = AddressMode::Wrap;  ///< Static sampler s0 address mode (u/v/w).
+    BlendMode          blend_mode         = BlendMode::Opaque;  ///< Render-target colour blend mode.
     RootLayout         root_layout        = RootLayout::Default; ///< Root-signature variant.
 };
 

@@ -25,6 +25,8 @@ struct Model {
     TextureHandle* textures    = nullptr; ///< All loaded textures (for cleanup).
     u32        texture_count   = 0;
     Allocator  alloc;                     ///< Allocator used for CPU-side arrays.
+    AddressMode sampler_address = AddressMode::Wrap; ///< Dominant glTF sampler wrap mode (drives the PBR static sampler).
+    bool       has_transparency = false;  ///< True if any material uses AlphaMode::Blend.
 };
 
 /**
