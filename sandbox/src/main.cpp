@@ -3,15 +3,85 @@
 #include "core/arena.h"
 #include "core/profiler.h"
 #include "core/cvar.h"
+#include "core/transform.h"
 #include "platform/window.h"
 #include "platform/timer.h"
 #include "gfx/renderer.h"
 #include "gfx/camera.h"
 #include "gfx/light.h"
+#include "input/input_map.h"
+#include "world/scene.h"
+#include "world/components.h"
+#include "physics/physics_world.h"
+#include "physics/rigidbody.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <filesystem>
+
+namespace {
+
+using namespace ge;
+
+/**
+ * Fixed-update gameplay system (per ADR-0009: a plain function, not a
+ * scheduler). Reads MoveForward/MoveRight axes plus a mouse-look delta and
+ * drives the player's rigid body: horizontal velocity is set directly from
+ * input (yaw-relative, so looking up/down doesn't tilt movement into the
+ * ground/sky), while vertical velocity is left untouched for gravity and
+ * the solver to own. Facing is also set directly from yaw rather than left
+ * to the solver, since the player capsule's rotation is locked (Milestone
+ * 5, docs/phases/05-physics.md) -- a physics-driven character still isn't
+ * "driven by torques," it just can't tip over or be launched off course by
+ * an unlucky impulse the way a thrown/dropped object could.
+ *
+ * Call before PhysicsWorld::step() each fixed tick.
+ */
+void system_move_player_physics(world::World& w, world::Entity player, physics::PhysicsWorld& phys,
+                                 f32 move_fwd, f32 move_right, f32 mouse_dx, f32 mouse_dy) {
+    auto* cc     = w.get_component<world::CharacterController>(player);
+    auto* rb_ref = w.get_component<world::RigidBodyRef>(player);
+    if (cc == nullptr || rb_ref == nullptr || rb_ref->body_id == world::kInvalidBodyId) return;
+
+    cc->yaw   += mouse_dx * cc->look_sensitivity;
+    cc->pitch += mouse_dy * cc->look_sensitivity;
+    constexpr f32 kMaxPitch = 1.5533f; // ~89 degrees, matches gfx::camera_fly_update
+    if (cc->pitch >  kMaxPitch) cc->pitch =  kMaxPitch;
+    if (cc->pitch < -kMaxPitch) cc->pitch = -kMaxPitch;
+
+    // Yaw-only facing for movement direction (pitch stays for the chase camera).
+    gfx::Camera facing;
+    facing.yaw = cc->yaw;
+    vec3 fwd   = facing.forward();
+    vec3 right = facing.right();
+
+    vec3 move = fwd * move_fwd + right * move_right;
+    f32 len_sq = move.x * move.x + move.y * move.y + move.z * move.z;
+    if (len_sq > 0.0001f) move = normalize(move);
+
+    physics::RigidBody& body = phys.body(rb_ref->body_id);
+    body.linear_velocity.x = move.x * cc->move_speed;
+    body.linear_velocity.z = move.z * cc->move_speed;
+    body.orientation = quat_from_axis_angle({0, 1, 0}, cc->yaw);
+}
+
+/**
+ * Fixed-update gameplay system: copies each physics-driven entity's
+ * RigidBody position/orientation into its Transform, the same "physics is
+ * the source of truth, Transform is derived" pattern PhysicsWorld itself
+ * uses internally. Call after PhysicsWorld::step().
+ */
+void system_sync_transform_from_rigidbody(world::World& w, physics::PhysicsWorld& phys) {
+    w.each<world::Transform, world::RigidBodyRef>(
+        [&](world::Entity, world::Transform& t, world::RigidBodyRef& rb) {
+            if (rb.body_id == world::kInvalidBodyId) return;
+            const physics::RigidBody& body = phys.body(rb.body_id);
+            t.position = body.position;
+            t.rotation = body.orientation;
+        });
+}
+
+} // namespace
 
 int main() {
     using namespace ge;
@@ -72,12 +142,43 @@ int main() {
         }
     }
 
-    // Set up camera — DamagedHelmet fits in roughly a 2-unit sphere at origin
-    ge::gfx::Camera camera;
-    camera.position = {0, 0.5f, -3.5f};
-    camera.yaw      = 0.0f;
-    camera.pitch    = -0.05f;
-    renderer.set_camera(camera);
+    // Phase 4: the DamagedHelmet is now a controllable entity, not a static
+    // prop — a Scene owns the World; the "player" entity's Transform drives
+    // both the model's world matrix and a chase camera behind it.
+    // Phase 5 (Milestone 5): the player's Transform is no longer written
+    // directly by input -- it's derived each fixed step from a PhysicsWorld
+    // rigid body (a rotation-locked capsule), via
+    // system_move_player_physics() + system_sync_transform_from_rigidbody().
+    world::Scene scene;
+    scene.init(64, perm.allocator());
+
+    physics::PhysicsWorld phys;
+    phys.init(16, perm.allocator());
+
+    // Static ground the character falls onto and walks around on. No visual
+    // representation yet (the renderer only knows how to draw the loaded
+    // glTF model) -- purely a physics volume; see docs/phases/05-physics.md.
+    phys.add_body(physics::make_box_body({0, -1, 0}, {20, 1, 20}, quat_identity(), 0.0f));
+
+    constexpr f32 kPlayerRadius     = 0.4f;
+    constexpr f32 kPlayerHalfHeight = 0.5f; // capsule tip-to-tip height: 2*(0.4+0.5) = 1.8
+    u32 player_body_id = phys.add_body(
+        physics::make_capsule_body({0, 3, 0}, quat_identity(), kPlayerRadius, kPlayerHalfHeight, 1.0f));
+    phys.body(player_body_id).friction = 0.5f;
+
+    world::Entity player = scene.create_entity("player");
+    scene.world().add_component<world::Transform>(player, world::Transform{});
+    scene.world().add_component<world::RigidBodyRef>(player, world::RigidBodyRef{player_body_id});
+
+    world::CharacterController player_controller{};
+    player_controller.pitch = -0.05f; // slight downward look, matching the old fixed camera framing
+    scene.world().add_component<world::CharacterController>(player, player_controller);
+
+    input::InputMap input_map;
+    input_map.bind_axis(string_id("MoveForward"), platform::KeyCode::W, platform::KeyCode::S);
+    input_map.bind_axis(string_id("MoveRight"), platform::KeyCode::D, platform::KeyCode::A);
+    input_map.bind_action(string_id("Sprint"), platform::KeyCode::LShift);
+    input_map.bind_action(string_id("Quit"), platform::KeyCode::Escape);
 
     // Set up lighting
     ge::gfx::DirectionalLight sun;
@@ -119,6 +220,7 @@ int main() {
 
         window.pump_events();
         renderer.resize(window.width(), window.height());
+        input_map.resolve(window);
 
         // Toggle mouse capture with right click
         if (window.mouse_button_down(platform::MouseButton::Right) && !mouse_captured) {
@@ -129,40 +231,46 @@ int main() {
             window.set_mouse_capture(false);
         }
 
-        // Escape to close
-        if (window.key_down(platform::KeyCode::Escape)) {
+        if (input_map.action_down(string_id("Quit"))) {
             break;
         }
 
-        // Camera input
+        f32 move_fwd   = input_map.axis(string_id("MoveForward"));
+        f32 move_right = input_map.axis(string_id("MoveRight"));
+        f32 speed_mult = input_map.action_down(string_id("Sprint")) ? 3.0f : 1.0f;
+
         while (accumulator >= fixed_dt) {
-            f32 move_fwd   = 0.0f;
-            f32 move_right = 0.0f;
-            f32 move_up    = 0.0f;
-
-            if (window.key_down(platform::KeyCode::W)) move_fwd   += 1.0f;
-            if (window.key_down(platform::KeyCode::S)) move_fwd   -= 1.0f;
-            if (window.key_down(platform::KeyCode::D)) move_right += 1.0f;
-            if (window.key_down(platform::KeyCode::A)) move_right -= 1.0f;
-            if (window.key_down(platform::KeyCode::E)) move_up    += 1.0f;
-            if (window.key_down(platform::KeyCode::Q)) move_up    -= 1.0f;
-
             f32 mdx = 0.0f, mdy = 0.0f;
             if (mouse_captured) {
                 window.mouse_delta(mdx, mdy);
             }
 
-            f32 speed = 3.0f;
-            if (window.key_down(platform::KeyCode::LShift)) speed *= 3.0f;
+            world::CharacterController* cc = scene.world().get_component<world::CharacterController>(player);
+            f32 saved_speed = cc->move_speed;
+            cc->move_speed *= speed_mult;
+            system_move_player_physics(scene.world(), player, phys, move_fwd, move_right, mdx, mdy);
+            cc->move_speed = saved_speed;
 
-            ge::gfx::camera_fly_update(camera, static_cast<f32>(fixed_dt),
-                                       move_fwd, move_right, move_up,
-                                       mdx, mdy, speed);
+            phys.step(static_cast<f32>(fixed_dt));
+            system_sync_transform_from_rigidbody(scene.world(), phys);
 
             accumulator -= fixed_dt;
         }
 
-        renderer.set_camera(camera);
+        // Chase camera: derived from the player entity each frame, not
+        // persistent state of its own (per docs/phases/04-world-gameplay.md).
+        {
+            world::Transform* pt = scene.world().get_component<world::Transform>(player);
+            world::CharacterController* cc = scene.world().get_component<world::CharacterController>(player);
+
+            gfx::Camera follow_cam;
+            follow_cam.yaw   = cc->yaw;
+            follow_cam.pitch = cc->pitch;
+            vec3 fwd = follow_cam.forward();
+            follow_cam.position = pt->position - fwd * 3.5f + vec3{0, 1.0f, 0};
+            renderer.set_camera(follow_cam);
+            renderer.set_model_transform(trs(pt->position, pt->rotation, pt->scale));
+        }
 
         {
             GE_PROFILE_SCOPE("render");
@@ -176,13 +284,16 @@ int main() {
         fps_timer += frame_time;
         if (fps_timer >= 1.0) {
             f64 avg_ms = profiler().last_frame_time() * 1000.0;
-            GE_INFO("FPS: {} | frame: {:.2f} ms", frames, avg_ms);
+            const vec3& player_pos = scene.world().get_component<world::Transform>(player)->position;
+            GE_INFO("FPS: {} | frame: {:.2f} ms | player.y: {:.2f}", frames, avg_ms, player_pos.y);
             frames = 0;
             fps_timer -= 1.0;
         }
     }
 
     GE_INFO("Shutting down ...");
+    scene.shutdown();
+    phys.shutdown();
     renderer.shutdown();
     window.destroy();
     perm.shutdown();

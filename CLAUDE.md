@@ -58,10 +58,10 @@ The engine is split into six **layers**, each depending only on those strictly b
 
 ```
 Layer 5: Application        ← sandbox (test bed)
-Layer 4: Frameworks         [ECS, world, gameplay, UI] — not yet implemented
-Layer 3: Subsystems         [graphics, physics, audio, animation, input, networking, AI] — not yet implemented
+Layer 4: Frameworks         ← ge_world (ECS, Scene) — gameplay framework, UI not yet implemented
+Layer 3: Subsystems         ← ge_gfx (DX12), ge_input, ge_physics — audio, animation, networking, AI not yet implemented
 Layer 2: Resources          [asset system, cooker] — not yet implemented
-Layer 1: Core foundation    ← platform → core (types, math, log, assert, arena)
+Layer 1: Core foundation    ← platform → core (types, math, log, assert, arena, reflection, serialization, jobs, containers, cvar)
 Layer 0: Platform           ← window, timer, virtual memory (Win32 only)
 ```
 
@@ -72,7 +72,11 @@ Layer 0: Platform           ← window, timer, virtual memory (Win32 only)
 | Path | Layer | Purpose |
 |------|-------|---------|
 | `engine/platform/` | 0 | OS abstraction: `window.h`, `timer.h`, `memory.h` |
-| `engine/core/` | 1 | Foundation: `types.h`, `log.h`, `assert.h`, `arena.h` |
+| `engine/core/` | 1 | Foundation: types, log, assert, arena/pool/stack allocators, math (vec/mat4/quat/transform), containers (`Array`, `HashMap`, `HandleTable`), reflection + serialization, job system, `StringId`, CVar system |
+| `engine/gfx/` | 3 | DX12 RHI (handle-based), render graph, PBR forward renderer, shadow mapping, glTF model loading |
+| `engine/input/` | 3 | `InputMap`: named action/axis binding on top of `platform::KeyCode` |
+| `engine/physics/` | 3 | Hand-written rigid-body physics: shapes/collision/GJK, broadphase, contact manifolds, sequential-impulse solver, `PhysicsWorld` |
+| `engine/world/` | 4 | Sparse-set ECS (`World`, `ComponentPool<T>`, generational `Entity`), `Scene` (roster + save/load) |
 | `sandbox/` | 5 | Application / test bed: `main.cpp` |
 
 ### Module layout
@@ -100,6 +104,14 @@ Strict downward-only: modules depend only on layers below them, siblings never d
 - **No exceptions in core or hot paths**; no RTTI (custom reflection system replaces it)
 - **Warnings as errors:** `/W4 /permissive-` (MSVC flags)
 
+### Testing strategy (ADR-0003)
+- Tiered testing matched to what's actually testable: **unit** (deterministic
+  logic — math, allocators, collision, containers), **simulation-baseline**
+  (seeded runs vs. a recorded end state within tolerance), **golden-image**
+  (offscreen render vs. reference PNG), **smoke** (boot → N frames → clean
+  shutdown, zero debug-layer errors), **manual** (feel/look review). Depth
+  matched to risk, not coverage numbers — see `docs/testing.md`.
+
 ### Memory management (ADR-0004)
 - **Arena (linear/bump allocator)** is the default: O(1) alloc, freed all at once via `reset()`.
 - Most data lives in long-lived permanent arenas (per-level, per-subsystem) or per-frame scratch arenas.
@@ -111,6 +123,30 @@ Strict downward-only: modules depend only on layers below them, siblings never d
 - **Row-major** matrix storage, **row vectors**
 - **[0, 1]** depth range
 - Scalar math first (header-only); SIMD deferred until profiling justifies it.
+
+### DX12 descriptor & binding model (ADR-0006)
+- Classic root signature + descriptor tables (not bindless/SM6.6) for now:
+  simpler to get correct first, revisit if descriptor-table churn shows up
+  as a bottleneck.
+
+### Reflection / type-system mechanism (ADR-0007)
+- Annotation macros + inline registration (`GE_REFLECT_BEGIN`/`GE_FIELD`/
+  `GE_REFLECT_END`), no RTTI, no codegen step. Each reflected type computes
+  its own `TypeInfo*` (field metadata via `offsetof`) at static-init time.
+  Feeds serialization directly; editor/network/scripting binding are future
+  consumers of the same `TypeInfo`.
+
+### ECS storage model (ADR-0008)
+- Sparse-set component pools (`ComponentPool<T>`: dense `Array<T>` + sparse
+  index array), not archetypes — simpler add/remove at Phase 4/5's entity
+  counts. `Entity` reuses `core/handle.h`'s generational `HandleTable`.
+  `World::each<T>` / `each<A,B>` are the query API; no archetype/query cache.
+
+### Scripting / iteration model (ADR-0009)
+- Plain compiled C++ systems (free functions taking `World&` + explicit
+  arguments), not an embedded scripting language or hot-reloadable DLLs —
+  deliberately deferred until gameplay code churns often enough to justify
+  the edit-compile-relink cost that alternative would solve.
 
 ## Code Style & Conventions
 
@@ -174,18 +210,31 @@ Run before claiming a task done, and report the answers:
 7. When something is ambiguous or would violate a rule, ask or flag — don't guess.
 8. When the deliverable is done (tests green by the definition above), update statuses: the phase-doc header, the `plan.md` Status log, and the module checklist.
 
-## Current Phase: Phase 4 — World & Gameplay
+## Current Phase: Phase 6 — Animation
 
-Phase 3 is **complete**: handle-based RHI (DX12 backend with HandleTables),
-render/frame graph (automatic barrier insertion), mesh/material/texture resources,
-glTF model import (cgltf), camera with fly-through controller, platform input
-(keyboard + mouse + raw input), forward Blinn-Phong lighting (directional + 4
-point lights), shadow mapping (2048x2048 depth-only pass, 3x3 PCF).
+Phase 5 is **complete**: hand-written rigid-body physics (`ge_physics`,
+Layer 3, depends only on `ge_core`). Collision primitives (`Sphere`, `Box`,
+`Capsule`) with narrowphase (`sphere_sphere`/`sphere_box`/`box_box` SAT/
+`capsule_box`) and a support-function GJK distance query for the general
+convex case; sweep-and-prune broadphase; contact manifold generation
+(Sutherland-Hodgman face clipping + edge-edge closest points, up to 4 points
+per pair); a sequential-impulse velocity solver (Baumgarte position
+correction, box-approximated Coulomb friction) plus semi-implicit Euler
+integration, wired end-to-end as `PhysicsWorld::step(dt)`. ECS-facing glue:
+`world::RigidBodyRef` (a bare opaque body-id handle — `ge_world` still has
+zero dependency on `ge_physics`) plus sandbox-hosted sync systems, mirroring
+where `system_move_player` already lived in Phase 4. The sandbox's player is
+now a rotation-locked capsule rigid body, driven by yaw-relative input
+velocity, falling under gravity and resting on a static ground box — a
+physics-driven, controllable character. 54 physics unit/baseline tests,
+including simulation-baseline settling tests for a box stack and the
+character capsule (Phase 5's DoD scenarios).
 
-Phase 4 goal: ECS, scene/world management, fixed-update integration, input wired
-to components, scripting/iteration layer.
+Phase 6 goal: skeletal animation with GPU skinning, clip sampling/looping,
+blend trees, animation state machines, root motion (IK later).
 
-See `docs/phases/04-world-gameplay.md` for design details (expand before coding).
+See `docs/phases/06-animation.md` for design details (expand before coding —
+currently a stub).
 
 ## Golden Rules (Never Violate)
 

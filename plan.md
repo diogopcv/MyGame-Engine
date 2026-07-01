@@ -84,19 +84,24 @@ Subsystems (Layer 3)
 - [x] Graphics: DX12 RHI (handle-based, render/frame graph, mesh/material/
       texture, model import, camera, forward lighting, shadow mapping)
 - [x] Graphics: render / frame graph
-- [x] Input (keyboard + mouse polling in Window — full input system Phase 4)
-- [ ] Physics (from scratch)
+- [x] Input (keyboard + mouse polling in Window; `ge_input` action/axis
+      mapping on top, Phase 4)
+- [x] Physics (from scratch): `ge_physics` — collision primitives + GJK,
+      sweep-and-prune broadphase, contact manifolds, sequential-impulse
+      solver + integration (`PhysicsWorld::step()`), sphere/box/capsule
+      rigidbody shapes
 - [ ] Audio
 - [ ] Animation
 - [ ] Networking / multiplayer
 - [ ] AI
 
 Frameworks (Layer 4)
-- [ ] ECS / world management
-- [ ] Scene
-- [ ] Gameplay framework
+- [x] ECS / world management (`ge_world`: sparse-set storage, ADR-0008)
+- [x] Scene (entity roster + name registry + Transform save/load)
+- [ ] Gameplay framework (beyond the Phase 4 movement system)
 - [ ] UI / HUD
-- [ ] Scripting / gameplay-iteration layer
+- [x] Scripting / gameplay-iteration layer (ADR-0009: plain C++ systems, not
+      an interpreted/hot-reload layer — deliberately deferred, see ADR)
 
 Application (Layer 5)
 - [x] Sandbox test bed
@@ -116,11 +121,11 @@ Accepted:
 - ADR-0004 — Memory management (arenas/pools over platform virtual memory).
 - ADR-0005 — Math conventions (handedness, matrix storage, depth range).
 - ADR-0006 — DX12 descriptor & binding model (classic root signature for now).
+- ADR-0007 — Reflection / type-system mechanism (Phase 2).
+- ADR-0008 — ECS storage model (Phase 4): sparse-set storage.
+- ADR-0009 — Scripting / iteration model (Phase 4): plain compiled C++ systems.
 
-Open — decide before the noted phase:
-- ADR-0007 — Reflection / type-system mechanism (Phase 2, accepted).
-- ADR-0008 — ECS storage model (Phase 4).
-- ADR-0009 — Scripting / iteration model (Phase 4).
+Open:
 - Editor scope: engine+editor vs engine-only (open) — until decided, design as
   if the editor is coming (reflection, serialization, undo, hot-reload).
 
@@ -162,7 +167,7 @@ done, regardless of how complete the feature looks.
   lighting; shadows.
 - DoD: load and render a real 3D model with lighting and a fly-through camera.
 
-### Phase 4 — World & gameplay
+### Phase 4 — World & gameplay  [COMPLETE]
 - Detail: [`docs/phases/04-world-gameplay.md`](docs/phases/04-world-gameplay.md)
 - ECS; scene/world management; fixed-update integration; input wired to
   components; scripting/iteration layer.
@@ -171,7 +176,7 @@ done, regardless of how complete the feature looks.
   single-frustum directional shadow, that's the trigger to build cascaded
   shadow maps in `ge_gfx` — not before. Not a hard deliverable of this phase.
 
-### Phase 5 — Physics from scratch
+### Phase 5 — Physics from scratch  [COMPLETE]
 - Detail: [`docs/phases/05-physics.md`](docs/phases/05-physics.md)
 - Broadphase (sweep-and-prune or BVH) -> narrowphase (GJK/EPA or SAT) -> contact
   manifolds -> constraint solver (sequential impulses) -> integration; CCD
@@ -403,4 +408,204 @@ lost, but they do not block any phase above.
   procedural environment IBL (hemispheric diffuse + Karis analytic EnvBRDF
   specular). HDR-cubemap IBL and OIT documented as remaining gaps. See
   `docs/phases/03-renderer.md` (Addendum 2).
-- Next up: Phase 4 — World & gameplay.
+- 2026-07-01 Phase 4 complete: World & gameplay. ADR-0008 accepted
+  (sparse-set ECS storage: `Entity` reuses `core/handle.h`'s
+  `HandleTable<u8, EntityTag>` for lifecycle; `ComponentPool<T>` is a dense
+  `Array<T>` + sparse index array with O(1) add/remove; `World::each<T>` /
+  `each<A,B>` are the query API — no archetype/query cache). ADR-0009
+  accepted (plain compiled C++ systems for now — no scripting language or
+  hot-reload DLL boundary yet). New `ge_world` module (Milestone 1: ECS core;
+  Milestone 2: `Scene` wraps a `World` + name registry, `save`/`load`
+  round-trips `Transform` through Phase 2's reflection/serialization). New
+  `ge_input` module (Milestone 1b: `InputMap` binds named actions/axes to
+  `platform::KeyCode`, `resolve()` templated over the key source so mapping
+  logic is unit-testable without a real OS window). Sandbox (Milestone 3+4):
+  the DamagedHelmet is now a `Scene`-owned "player" entity with `Transform` +
+  `CharacterController`; a fixed-update `system_move_player` free function
+  reads `InputMap` axes and updates its Transform; the free-fly camera is
+  replaced by a chase camera derived each frame from the entity's transform
+  and look angles. 21 new unit tests (12 world entity/component/query + 4
+  scene save-load + 5 input-mapping resolution), all green; full CTest suite
+  (5 executables) green, 0 DX12 debug-layer errors, sandbox smoke-run clean.
+- 2026-07-01 Phase 5 Milestone 1 done: collision primitives + narrowphase
+  math. New `ge_physics` module (Layer 3, depends only on `ge_core` — no
+  sideways dependency on `ge_world`/`ge_gfx`, per ADR-0001). `shapes.h`:
+  `AABB`, `Sphere`, `Box` (OBB: center + half-extents + quaternion
+  orientation) plus AABB helpers (`aabb_union`, `aabb_from_sphere`,
+  `aabb_from_box`). `collision.h/.cpp`: `aabb_overlap`; `sphere_sphere` and
+  `sphere_box` closest-point tests with normal + penetration depth (the
+  sphere_box degenerate/embedded-center case falls back to the axis of
+  least penetration); `box_box` via the 15-axis SAT (3+3 face normals, 9
+  edge cross-products), tracking the minimum-overlap axis as the
+  minimum-translation-vector normal. `gjk.h/.cpp`: support-function-based
+  GJK distance query (`support_sphere`, `support_box`) using Ericson-style
+  closest-point-to-origin simplex reduction (segment/triangle/tetrahedron
+  Voronoi-region cases) for the general convex-vs-convex separated-distance
+  case plan.md's critical-test line calls for. `Contact::normal` convention
+  fixed as "points from the first shape argument to the second" throughout.
+  24 unit tests (54 assertions): AABB overlap incl. touching; sphere-sphere
+  incl. coincident-center degenerate case; sphere-box incl. a rotated-box
+  corner case and an embedded-center fallback case; box-box incl. touching/
+  overlapping/separated axis-aligned and single-axis-rotated cases, plus a
+  cross-validation test comparing SAT's boolean outcome against GJK across
+  compound-rotated configurations (the two algorithms are independent code
+  paths, so agreement is meaningful evidence — hand-deriving exact
+  penetration depths for compound rotations by hand was judged too
+  error-prone to hardcode directly); GJK distance tests for sphere-sphere,
+  sphere-box, and box-box (incl. a diagonal corner-to-corner case), all
+  cross-checked against closed-form geometry. Full CTest suite (6
+  executables) green, 0 warnings at `/W4 /permissive-`.
+- 2026-07-01 Phase 5 Milestone 2 done: broadphase + pair generation.
+  `broadphase.h/.cpp`: `Broadphase` class (`Proxy` = caller id + `AABB`,
+  `Pair` = confirmed-overlapping id pair) doing a fresh sort-and-sweep each
+  step — sorts proxies by AABB `min.x` (`std::sort`, same pattern already
+  used for transparent-object sorting in `ge_gfx`), then sweeps forward with
+  the standard early-out (`min.x[j] > max.x[i] -> break`), confirming true
+  3D overlap via `aabb_overlap` for every X-interval candidate before
+  emitting a pair. 6 unit tests (empty/no-pairs/one-pair/clear() cases plus
+  an X-overlaps-but-Y-separated regression case for the "X overlap alone
+  isn't 3D overlap" bug class), plus a cross-check against a brute-force
+  O(n^2) `aabb_overlap` reference over a 10-box mixed scene (dense
+  overlapping cluster + isolated singletons + an X/Z-overlapping-but-
+  Y-separated pair), comparing the full sorted pair sets for exact equality
+  rather than spot-checking individual pairs. Full CTest suite (6
+  executables, 30 physics test cases / 62 assertions) green, 0 warnings at
+  `/W4 /permissive-`.
+- 2026-07-01 Phase 5 Milestone 3 done: contact manifold generation.
+  Refactored `box_box()`'s 15-axis SAT loop into a shared private
+  `detail::box_box_sat` (`engine/physics/src/sat_internal.h`, not a public
+  header) that also classifies which axis won (face of A, face of B, or one
+  of the 9 edge cross-products) — `collision.h`'s `box_box()` is now a thin
+  wrapper over it, so the public single-normal API is unchanged and its
+  existing tests kept passing through the refactor untouched. New
+  `manifold.h/.cpp`: `Manifold` (up to 4 `ManifoldPoint`s: world position +
+  per-point penetration). `manifold_sphere_sphere`/`manifold_sphere_box` are
+  single-point (surface midpoint along the narrowphase normal).
+  `manifold_box_box` branches on the winning SAT axis: face contacts pick a
+  reference face (the box owning the axis) and an incident face (the other
+  box's face most anti-parallel to the reference normal), then clip the
+  incident face's 4 corners against the reference face's 4 side planes
+  (Sutherland-Hodgman), keeping points that land behind the reference plane
+  (>4 clipped points falls back to keeping the 4 deepest rather than a full
+  area-maximizing reduction — noted as a possible revisit if the box-stack
+  baseline test needs better spread). Edge contacts compute the closest
+  points between the two SAT-identified witness edges (Ericson-style
+  clamped segment-segment closest point) and reduce to their midpoint. 13
+  new unit tests: sphere manifolds' exact surface-midpoint positions; two
+  hand-derived box-box face-contact cases (a flush 4-corner resting contact
+  and a sideways-shifted one where clipping must trim to the true overlap
+  footprint) with exact expected corner positions and penetration depths;
+  and an invariant-based test (valid manifold, 1-4 points, unit normal,
+  non-negative penetration) across axis-aligned/single-axis/compound-
+  rotated configurations reused from Milestone 1's SAT/GJK cross-validation
+  set, since hand-deriving exact contact geometry for compound rotations
+  was judged too error-prone to hardcode (same reasoning as Milestone 1).
+  Full CTest suite (6 executables, 37 physics test cases / 128 assertions)
+  green, 0 warnings at `/W4 /permissive-`.
+- 2026-07-01 Phase 5 Milestone 4 done: constraint solver + integration.
+  New `rigidbody.h`: `RigidBody` (shape + transform + velocities + inverse
+  mass/inertia + material), `make_sphere_body`/`make_box_body` factories
+  computing solid-shape inertia tensors (`inv_mass == 0` marks static), and
+  `apply_inv_inertia()` (rotates a torque-like vector into body space via
+  the same "world axes = rows of quat_to_matrix" convention used throughout
+  `ge_physics`, scales by the diagonal inverse tensor, rotates back). New
+  `solver.h/.cpp`: `ContactConstraint` + `prepare_constraints()` (lever
+  arms, tangent basis, effective masses, restitution/Baumgarte velocity
+  bias — precomputed once per step since positions don't change during
+  velocity iteration) + `solve_velocity_constraints()` (sequential-impulse
+  passes: non-penetration normal impulse clamped >=0, two independent
+  tangential friction impulses clamped to a box approximation of the
+  Coulomb cone). New `physics_world.h/.cpp`: `PhysicsWorld::step(dt)` wires
+  gravity -> broadphase -> narrowphase/manifold dispatch (by shape-type
+  pair) -> constraint building -> solve -> semi-implicit Euler integration
+  (linear position directly; angular via quaternion integration, `dq =
+  orientation * spin_quat` — orientation applied first per this engine's
+  documented "apply p first, then q" `quat` operator* / row-vector `mat4`
+  convention, *not* the more commonly-seen `spin * orientation` ordering).
+  16 new unit tests: solver-level exact hand-derived outcomes (equal-mass
+  elastic collision exchanges velocities, inelastic collision stops both
+  bodies at the momentum-weighted average, a static body is never moved,
+  Baumgarte bias on an at-rest penetrating pair matches the closed-form
+  bias formula) using head-on sphere-sphere constraints where the contact
+  point lies on the line through both centers (r parallel to the normal,
+  so every impulse is provably non-rotational — isolates the linear-
+  collision math from manifold/torque complexity); PhysicsWorld-level
+  tests: free-fall matches the semi-implicit Euler recurrence, a static
+  body never moves, angular-velocity integration direction cross-checked
+  against `quat_from_axis_angle` (this is what caught and fixed a
+  backwards composition order before it shipped — see below), and three
+  simulation-baseline settling tests (dropped sphere and dropped box each
+  come to rest on static ground within 0.05 units of the analytic contact
+  height and near-zero residual velocity after 5s; a 2-box stack settles
+  to both expected resting heights within 0.1 units after 6s) — the last
+  one is the literal Phase 5 DoD scenario (stacking boxes) and is the
+  strongest end-to-end validation yet that broadphase, manifold generation,
+  and the solver are all correctly wired together. Full CTest suite (6
+  executables, 47 physics test cases / 152 assertions) green, 0 warnings
+  at `/W4 /permissive-`.
+  Process note: derived the quaternion angular-velocity integration order
+  by hand from the row-vector/`operator*` conventions (documented in the
+  commit above), but treated that derivation as a hypothesis, not a given —
+  wrote the `quat_from_axis_angle` cross-check test specifically to verify
+  it empirically before trusting it, since composition-order bugs are easy
+  to get backwards and hard to notice without a targeted test (the test
+  passed on the first run, confirming the derivation).
+- 2026-07-01 Phase 5 Milestone 5 done (**Phase 5 complete**): rigidbody/
+  collider ECS components + system glue; physics-driven controllable
+  character. Added `Capsule` (segment + radius) to `shapes.h`, `capsule_box`
+  narrowphase to `collision.h/.cpp` (reused a new shared `point_radius_vs_box`
+  helper factored out of `sphere_box`'s existing logic — the closest point on
+  the capsule's core segment stands in for a sphere center), `support_capsule`
+  to `gjk.h/.cpp`, and `manifold_capsule_box` to `manifold.h/.cpp`. New
+  private `src/closest_point_internal.h`: `closest_point_on_box`,
+  `closest_point_on_segment`, and `closest_points_segment_box` (alternating
+  projection between the two convex sets — segment and box — converges to
+  the true closest-point pair in a handful of iterations; this is new,
+  unverified-by-precedent code, so it was cross-validated against GJK using
+  `support_capsule`/`support_box`, the same strategy Milestone 1 used for
+  `box_box()`'s compound-rotation cases). `RigidBody` gained
+  `ShapeType::Capsule` + `capsule_half_height` + `make_capsule_body()` —
+  always rotation-locked (`inv_inertia_local = 0`), a deliberate character-
+  controller simplification: a player capsule shouldn't tip over from solver
+  torques, so its facing is driven directly by input instead (see below).
+  `physics_world.cpp`'s shape-pair dispatch now covers capsule-box (both
+  orderings); capsule-sphere/capsule-capsule are undispatched by design (no
+  such pair exists in this scene) rather than guessed at.
+  ECS side: `world::components.h` gained `RigidBodyRef { u32 body_id }` — a
+  bare opaque index, not a copy of or pointer into any `ge::physics` type, so
+  `ge_world` still has zero dependency on `ge_physics` (ADR-0001 would permit
+  it, since Layer 4 may depend on Layer 3, but nothing in the ECS itself
+  needs to). The system functions that resolve that id against a
+  `PhysicsWorld` live in the sandbox, not `ge_world` — `system_move_player_
+  physics()` (sets yaw-relative horizontal velocity from WASD, leaves
+  vertical velocity to gravity/the solver, sets facing directly from yaw
+  since rotation is locked) and `system_sync_transform_from_rigidbody()`
+  (copies the post-`step()` RigidBody state into Transform for rendering) —
+  exactly where `system_move_player` already lived in Phase 4, since the
+  sandbox is the one place that legitimately owns both a `World` and a
+  `PhysicsWorld`. Sandbox: added an invisible static ground box (no renderer
+  support for primitive meshes yet — a Phase 3/13 concern, not Phase 5's);
+  the player is now a capsule (radius 0.4, half-height 0.5) dropped at y=3,
+  replacing the old free-fly Transform-writing controller; removed the
+  MoveUp (E/Q) binding since vertical motion is physics-owned now.
+  9 new unit tests (capsule_box hand-derived standing/separated/flush cases
+  plus GJK cross-validation across tilted configurations; manifold_
+  capsule_box surface-midpoint; a PhysicsWorld baseline settling test for a
+  dropped character capsule). Full CTest suite (6 executables, 54 physics
+  test cases / 178 assertions) green, 0 warnings at `/W4 /permissive-`.
+  Verification went beyond unit tests: launched the actual sandbox.exe and
+  read its console log — the capsule (dropped from y=3) settled at
+  `player.y: 0.89` against a hand-computed expected resting height of
+  exactly 0.9 (ground top 0 + radius 0.4 + half-height 0.5), ran cleanly for
+  ~27 seconds with zero DX12 debug-layer errors, and exited cleanly. This is
+  the strongest evidence yet that broadphase, capsule-box narrowphase/
+  manifold, the solver, and the ECS sync systems are all correctly wired
+  together in the real application, not just in isolated tests.
+  No new ADR: this milestone extended the established Layer-3-subsystem
+  pattern (shapes/collision/gjk/manifold/rigidbody, same shape as Milestones
+  1-4) rather than introducing a new cross-cutting architectural decision;
+  the `RigidBodyRef`-as-opaque-handle placement decision is a direct
+  continuation of ADR-0009's "plain compiled C++ systems, glue lives with
+  whichever code owns both sides" precedent, not a new one.
+- Next up: Phase 6 — Animation. See `docs/phases/06-animation.md` (currently
+  a stub; expand before starting, per the standard process).
