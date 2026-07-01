@@ -8,7 +8,7 @@ follow the upkeep rules at the bottom.
 - **`plan.md`** (repo root) — the high-level roadmap and **source of truth for
   scope and status**. Deliberately short and scannable; read at the start of
   every session.
-- **`agent.md`** (repo root) — the working agreement: rules, conventions, the
+- **`CLAUDE.md`** (repo root) — the working agreement: rules, conventions, the
   definition of done. Read in full before changing code.
 - **`docs/phases/NN-name.md`** — one design doc per phase. Holds the depth:
   scope, concrete tech decisions, key data structures, module APIs, algorithms,
@@ -20,7 +20,7 @@ follow the upkeep rules at the bottom.
 
 ## Why it is split this way
 
-Cadence matches consumption. `plan.md` and `agent.md` are read every session and
+Cadence matches consumption. `plan.md` and `CLAUDE.md` are read every session and
 must stay light. Phase docs are volatile and read only while working that phase.
 ADRs are durable references read occasionally. Detail that would bloat `plan.md`
 and rot goes into phase docs; rationale that must survive goes into ADRs. Each

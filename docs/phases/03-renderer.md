@@ -25,10 +25,15 @@ and a fly-through camera.
 - Platform input extension (keyboard + mouse state in Window)
 
 **Out of scope:**
-- Vulkan / multi-backend (DX12 only — add abstraction layer if/when needed)
-- PBR materials (Blinn-Phong first; PBR upgrade is a follow-up)
-- Cascaded shadow maps, soft shadows, ambient occlusion
-- Post-processing stack
+- Vulkan / multi-backend (DX12 only) — **backlog**, not phase-scheduled; only if
+  portability becomes an actual requirement. See `plan.md` Backlog section.
+- PBR materials (Blinn-Phong first; PBR upgrade is a follow-up) — **done**, see
+  Phase 3 Addendum below.
+- Cascaded shadow maps — revisit when a Phase 4/5 scene's extent exposes the
+  single-frustum shadow's limits (trigger-based, not date-based). See `plan.md`
+  Phase 4/5 entries.
+- Soft shadows, ambient occlusion, post-processing stack — bundled into the
+  graphics-polish pass scheduled before Phase 14. See `plan.md` Phase 14 entry.
 - Scene graph / spatial queries (Phase 4)
 
 ## Tech decisions
@@ -457,11 +462,18 @@ PBR layout gains the `TEXCOORD1` / `COLOR` / shifted `TANGENT` elements.
 
 - **HDR-cubemap IBL** (equirect/cubemap load → prefiltered radiance mips +
   irradiance map + BRDF LUT). The analytic environment model above stands in
-  until an HDR asset and the offline prefilter pass exist. Tracked for a later
-  graphics pass.
+  until an HDR asset and the offline prefilter pass exist. **Scheduled for
+  Phase 11** (Asset pipeline & cooker) — the prefilter bake is offline-cooker
+  work, so it lands with the cooker's build graph rather than earlier. See
+  `plan.md` Phase 11 entry and `docs/phases/11-pipeline.md`.
 - Order-independent transparency (OIT). The back-to-front sort is correct for
-  the single-model case and convex-ish meshes; true OIT is future work.
-- Cascaded/▸soft shadows for transparent receivers.
+  the single-model case and convex-ish meshes; true OIT is **backlogged into
+  the pre-Phase 14 graphics-polish pass**, done only if the actual
+  vertical-slice scene exposes a real sorting failure (no speculative build).
+  See `plan.md` Phase 14 entry.
+- Cascaded/soft shadows for transparent receivers — bundled with the general
+  cascaded-shadow work (see the original Out of scope list above): trigger-based
+  on Phase 4/5 scene scale, see `plan.md`.
 
 ### Test plan / verification
 

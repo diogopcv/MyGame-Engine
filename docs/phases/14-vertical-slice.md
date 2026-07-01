@@ -12,6 +12,17 @@ packaged build.
 A small complete game; CPU/GPU/memory optimization passes; Release/Shipping build
 configs; packaging/distribution; documentation.
 
+Carried over from Phase 3 (gfx) as a graphics-polish pass, done here rather
+than earlier because none of the intervening gameplay phases depend on it:
+- Soft shadows, ambient occlusion (tone mapping already landed with the PBR
+  addendum).
+- Post-processing stack.
+- Order-independent transparency (OIT) — only if the actual vertical-slice
+  scene exposes a transparency-sorting failure the existing back-to-front sort
+  can't handle; not built speculatively.
+
+See `docs/phases/03-renderer.md` Out of scope notes for the origin of each item.
+
 ## Tech decisions
 To be decided when this phase begins (perf budgets, packaging format).
 

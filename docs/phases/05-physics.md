@@ -42,5 +42,11 @@ seeded box-stack settles to a recorded resting state within tolerance
 ## Open questions
 - Broadphase structure; solver iteration counts; when CCD becomes necessary.
 
+## Cross-phase watch item
+Same cascaded-shadow trigger noted in Phase 4: a physics-scale level built here
+is another likely point where the single-frustum shadow map stops being
+enough. Whichever phase (4 or 5) hits it first is where cascaded shadows get
+built in `ge_gfx`. See `docs/phases/03-renderer.md` and `plan.md`.
+
 ## Depends on
 - Phase 4 (ECS/world), Phase 0 (math).

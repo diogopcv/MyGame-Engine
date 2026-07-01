@@ -13,6 +13,13 @@ components — ending in a controllable entity in a rendered scene.
   scripting/iteration layer (ADR-0009).
 - Out of scope: physics simulation (Phase 5); AI behaviors (Phase 9).
 
+## Cross-phase watch item
+Carried over from Phase 3 (gfx): if a scene's world extent outgrows the
+current single-frustum directional shadow map, that's the signal to build
+cascaded shadow maps in `ge_gfx` (not a deliverable of this phase itself — just
+flag it if hit while building test scenes here). See
+`docs/phases/03-renderer.md` Out of scope notes and `plan.md`.
+
 ## Tech decisions
 - **ECS storage model** — ADR-0008 (archetype vs sparse set vs hybrid).
 - **Scripting / iteration model** — ADR-0009 (decide before gameplay logic).

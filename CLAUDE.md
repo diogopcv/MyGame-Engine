@@ -148,18 +148,8 @@ Every phase is done **only** when all of these hold:
 - **Golden rules still hold** (see Golden Rules section below)
 - **Phase's manual-review items are checked off**
 
-### Test framework
-- Lightweight **doctest** (header-only) for unit tests; GoogleTest if heavier fixtures or mocking are needed — pull via CMake `FetchContent` or vendor under `third_party/`
-- Each module owns its tests in `engine/<module>/tests/`, building a `ge_<module>_tests` executable registered with `enable_testing()` + CTest
-- Tests are tiered by risk:
-  - **Unit tests:** deterministic pure logic (math, allocators, containers, serialization)
-  - **Simulation baselines:** run a fixed, seeded sim and assert end state vs. recorded baseline
-  - **Golden-image tests:** render a known scene offscreen, compare to reference PNG within tolerance
-  - **Smoke tests:** boot, run N frames, shut down; assert no crash/leak/assert
-  - **Manual review:** feel, latency, audio, look — human sign-off against a checklist
-
-### Build to be testable
-Prefer free functions and explicit dependencies over hidden globals; keep simulation deterministic and RNG seedable; abstract the clock so tests can feed time. Keep the DX12 debug layer + DRED and a debug leak-tracking allocator (or ASan) on in Debug builds as always-on correctness nets.
+Framework, test tiers, and "build to be testable" guidance: see
+[`docs/testing.md`](docs/testing.md) (rationale in ADR-0003).
 
 ### Proportionality
 Write tests where a bug is costly or hard to spot (math correctness, memory safety, serialization, netcode, determinism). Skip trivial getters and coverage-padding. Never let test-writing stall the vertical slice — match test depth to risk.
@@ -213,15 +203,9 @@ See `docs/phases/04-world-gameplay.md` for design details (expand before coding)
 
 ## Third-Party Libraries
 
-Allowed for **solved, non-core problems only:**
-- Asset import: cgltf / assimp
-- Image decode: stb_image
-- Debug/editor UI: Dear ImGui
-- Test framework: doctest / GoogleTest
-
-**Not allowed:** replacing the from-scratch goals (DX12 renderer and physics solver are hand-written).
-
-Vendor third-party code under `third_party/` and wrap each behind an engine interface so it never leaks into subsystem APIs.
+Solved, non-core problems only (asset import, image decode, debug UI, test
+framework) — never the from-scratch goals (DX12 renderer, physics solver).
+Full policy and vendoring rule: [`docs/third-party-libraries.md`](docs/third-party-libraries.md).
 
 ## Documentation Map
 
@@ -230,6 +214,8 @@ Vendor third-party code under `third_party/` and wrap each behind an engine inte
 - `docs/phases/NN-*.md` — per-phase design depth (expanded just-in-time)
 - `docs/decisions/NNNN-*.md` — Architecture Decision Records (ADRs) capturing rationale
 - `docs/decisions/README.md` — index of all ADRs
+- `docs/testing.md` — test framework, tiers, and testability guidance (read when setting up a module's tests)
+- `docs/third-party-libraries.md` — allowed libraries and vendoring policy (read when adding a dependency)
 - **API reference** — all public headers carry Doxygen `/** */` documentation
   (`@file`, `@brief`, `@param`, `@return`, `@tparam`).  Run `doxygen` from the
   repo root (once a Doxyfile is added) to generate HTML/XML output.

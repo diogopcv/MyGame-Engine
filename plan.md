@@ -167,6 +167,9 @@ done, regardless of how complete the feature looks.
 - ECS; scene/world management; fixed-update integration; input wired to
   components; scripting/iteration layer.
 - DoD: a controllable entity in a rendered scene.
+- Watch item (carried from Phase 3): if the scene's world extent outgrows the
+  single-frustum directional shadow, that's the trigger to build cascaded
+  shadow maps in `ge_gfx` — not before. Not a hard deliverable of this phase.
 
 ### Phase 5 — Physics from scratch
 - Detail: [`docs/phases/05-physics.md`](docs/phases/05-physics.md)
@@ -174,6 +177,8 @@ done, regardless of how complete the feature looks.
   manifolds -> constraint solver (sequential impulses) -> integration; CCD
   later. Exposed via rigidbody/collider components.
 - DoD: stacking boxes plus a physics-driven, controllable character.
+- Same cascaded-shadow watch item as Phase 4: a physics-scale level is another
+  likely trigger point, whichever phase hits it first.
 
 ### Phase 6 — Animation
 - Detail: [`docs/phases/06-animation.md`](docs/phases/06-animation.md)
@@ -222,6 +227,10 @@ done, regardless of how complete the feature looks.
   tracking and incremental, parallel cooking; conversion to engine-native
   binary; stable asset GUIDs/references; validation. Pairs with the runtime
   resource system from Phases 2–3, which has been growing alongside it.
+- Carried over from Phase 3 (gfx): HDR-cubemap IBL prefiltering (equirect/
+  cubemap import → prefiltered radiance mips + irradiance map + BRDF LUT),
+  baked offline through this phase's build graph. See
+  `docs/phases/03-renderer.md` Addendum 2.
 - DoD: one command cooks a raw content folder into loadable engine assets,
   rebuilding only what changed.
 
@@ -246,6 +255,11 @@ done, regardless of how complete the feature looks.
 - Build a small but complete game with the engine as the forcing function;
   optimization passes (CPU, GPU, memory); Release/Shipping build configs;
   packaging and distribution; documentation.
+- Graphics-polish pass carried over from Phase 3 (gfx): soft shadows, ambient
+  occlusion, and a post-processing stack (tone mapping is already in place from
+  the PBR addendum). Order-independent transparency (OIT) only if the vertical-
+  slice scene actually exposes a transparency-sorting failure — no speculative
+  build. See `docs/phases/03-renderer.md` Out of scope notes.
 - DoD: a shippable playable demo that runs on a clean machine from a packaged
   build.
 
@@ -274,6 +288,19 @@ asserts — that is expected, not a gap.
 | 12 Tooling | **Unit:** profiler timings track known sleeps; memory tracker detects an injected leak; CVar parse/set round-trip. |
 | 13 Editor | **Unit:** undo/redo round-trip restores state; save → load yields an equal scene; gizmo transform math. **Manual:** editing workflow. |
 | 14 Vertical slice | **Smoke:** full game boot → play → quit on a clean machine. **Perf:** frame-time and memory budgets met. **Manual:** playtest sign-off. |
+
+## Backlog / stretch goals (not phase-scheduled)
+
+Items intentionally deferred with no fixed phase, because they're conditional
+on a requirement the project doesn't currently have. Listed here so they're not
+lost, but they do not block any phase above.
+
+- **Vulkan / multi-backend renderer** (from Phase 3 scope). The engine targets
+  Windows/DX12 only (see `CLAUDE.md`); there's no cross-platform requirement
+  driving this today. If one ever appears, do it *after* the RHI surface stops
+  churning (post Phase 6 or so) — adding a second backend earlier means every
+  subsequent RHI change has to be mirrored twice. Until then, this stays
+  unscheduled by design, not by oversight.
 
 ## Status log
 
