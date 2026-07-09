@@ -68,4 +68,28 @@ std::size_t file_size(const char* path) {
     return static_cast<std::size_t>(li.QuadPart);
 }
 
+std::size_t executable_dir(char* out, std::size_t capacity) {
+    if (!out || capacity == 0) return 0;
+
+    wchar_t wide[MAX_PATH];
+    const DWORD len = GetModuleFileNameW(nullptr, wide, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) return 0;
+
+    // Strip the executable filename: cut at the last path separator.
+    int dir_len = static_cast<int>(len);
+    while (dir_len > 0 && wide[dir_len - 1] != L'\\' && wide[dir_len - 1] != L'/')
+        --dir_len;
+    // Drop the trailing separator, unless it terminates a drive root ("C:\").
+    if (dir_len > 1 && !(dir_len == 3 && wide[1] == L':')) --dir_len;
+    if (dir_len <= 0) return 0;
+
+    const int written = WideCharToMultiByte(CP_UTF8, 0, wide, dir_len,
+                                            out, static_cast<int>(capacity) - 1,
+                                            nullptr, nullptr);
+    if (written <= 0) return 0;
+
+    out[written] = '\0';
+    return static_cast<std::size_t>(written);
+}
+
 } // namespace ge::platform

@@ -505,18 +505,19 @@ bool load_model_gltf(const char* path, RhiDevice& rhi, Allocator alloc, Model& o
 
     cgltf_free(data);
 
-    // --- Create GPU buffers ---
+    // --- Create GPU buffers (default heap: static geometry lives in VRAM,
+    //     uploaded once through the RHI's staging path) ---
     BufferDesc vb_desc{};
     vb_desc.size         = total_vertices * sizeof(LitVertex);
     vb_desc.usage        = BufferUsage::Vertex;
-    vb_desc.cpu_visible  = true;
+    vb_desc.cpu_visible  = false;
     vb_desc.initial_data = vertices.data();
     out.mesh.vertex_buffer = rhi.create_buffer(vb_desc);
 
     BufferDesc ib_desc{};
     ib_desc.size         = total_indices * sizeof(u32);
     ib_desc.usage        = BufferUsage::Index;
-    ib_desc.cpu_visible  = true;
+    ib_desc.cpu_visible  = false;
     ib_desc.initial_data = indices.data();
     out.mesh.index_buffer = rhi.create_buffer(ib_desc);
 

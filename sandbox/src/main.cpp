@@ -6,6 +6,7 @@
 #include "core/transform.h"
 #include "platform/window.h"
 #include "platform/timer.h"
+#include "platform/file.h"
 #include "gfx/renderer.h"
 #include "gfx/camera.h"
 #include "gfx/light.h"
@@ -15,8 +16,6 @@
 #include "physics/physics_world.h"
 #include "physics/rigidbody.h"
 
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
 #include <filesystem>
 
 namespace {
@@ -129,16 +128,22 @@ int main() {
     renderer.set_clear_color(0.05f, 0.1f, 0.2f, 1.0f);
 
     // Load model
+    gfx::ModelId helmet = gfx::kInvalidModelId;
     {
-        wchar_t exe_path[MAX_PATH];
-        ::GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
-        auto model_path = std::filesystem::path(exe_path).parent_path()
-                          / ".." / ".." / ".." / "assets" / "models" / "DamagedHelmet.glb";
-        std::string model_str = model_path.string();
-        if (renderer.load_model(model_str.c_str(), perm.allocator())) {
-            GE_INFO("Loaded model: {}", model_str);
-        } else {
-            GE_WARN("Could not load model — using built-in cube");
+        char exe_dir[512];
+        if (platform::executable_dir(exe_dir, sizeof(exe_dir)) > 0) {
+            // exe_dir is UTF-8; go through char8_t so accented paths survive.
+            std::filesystem::path model_path(
+                std::u8string(reinterpret_cast<const char8_t*>(exe_dir)));
+            model_path = model_path / ".." / ".." / ".." / "assets" / "models"
+                         / "DamagedHelmet.glb";
+            std::string model_str = model_path.string();
+            helmet = renderer.load_model(model_str.c_str(), perm.allocator());
+            if (helmet != gfx::kInvalidModelId) {
+                GE_INFO("Loaded model: {}", model_str);
+            } else {
+                GE_WARN("Could not load model — using built-in cube");
+            }
         }
     }
 
@@ -269,12 +274,15 @@ int main() {
             vec3 fwd = follow_cam.forward();
             follow_cam.position = pt->position - fwd * 3.5f + vec3{0, 1.0f, 0};
             renderer.set_camera(follow_cam);
-            renderer.set_model_transform(trs(pt->position, pt->rotation, pt->scale));
         }
 
         {
             GE_PROFILE_SCOPE("render");
             renderer.begin_frame(static_cast<float>(frame_time));
+            if (helmet != gfx::kInvalidModelId) {
+                world::Transform* pt = scene.world().get_component<world::Transform>(player);
+                renderer.submit(helmet, trs(pt->position, pt->rotation, pt->scale));
+            }
             renderer.end_frame();
         }
 

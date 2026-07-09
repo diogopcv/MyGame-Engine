@@ -1,12 +1,13 @@
 # Layer 3: graphics subsystem (DX12 RHI). Depends only on ge_core (and
 # transitively ge_platform). All <d3d12.h>/<dxgi1_6.h>/<windows.h> usage stays
-# inside src/renderer_dx12.cpp; the public header is platform-clean.
+# inside src/rhi_dx12.cpp; the renderer, render graph, and model loader are
+# backend-agnostic and the public headers are platform-clean.
 
 add_library(ge_gfx STATIC
     src/rhi_dx12.cpp
     src/render_graph.cpp
     src/model_loader.cpp
-    src/renderer_dx12.cpp
+    src/renderer.cpp
 )
 
 target_include_directories(ge_gfx PUBLIC include)
@@ -55,8 +56,6 @@ endfunction()
 
 ge_gfx_compile_shader(cube_vs vs_6_0)
 ge_gfx_compile_shader(cube_ps ps_6_0)
-ge_gfx_compile_shader(model_vs vs_6_0)
-ge_gfx_compile_shader(model_ps ps_6_0)
 ge_gfx_compile_shader(shadow_vs vs_6_0)
 ge_gfx_compile_shader(pbr_vs vs_6_0)
 ge_gfx_compile_shader(pbr_ps ps_6_0)

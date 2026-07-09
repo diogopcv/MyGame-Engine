@@ -1,6 +1,14 @@
 # Graphics and Rendering
 
-This document covers the entire graphics subsystem: the DirectX 12 fundamentals, the Render Hardware Interface (RHI) abstraction, the render graph, mesh and material resources, model loading, the camera system, forward lighting (Blinn-Phong and PBR), shadow mapping, transparency, and analytic environment lighting (IBL).
+This document covers the entire graphics subsystem: the DirectX 12 fundamentals, the Render Hardware Interface (RHI) abstraction, the render graph, mesh and material resources, model loading, the camera system, forward lighting (PBR, plus the retired Blinn-Phong model for reference), shadow mapping, transparency, and analytic environment lighting (IBL).
+
+> **Updated for ADR-0010 (2026-07-09).** The renderer now uses a multi-model
+> draw-submission API (`load_model` → `ModelId`, per-frame `submit()`), a
+> per-frame constant-buffer upload ring, and a generalized `BindingLayout`
+> instead of hardcoded root-signature variants. The dedicated Blinn-Phong
+> model pipeline (`model_vs/ps.hlsl`) was retired — PBR is the only model
+> path. The Blinn-Phong theory section is kept as study material and marked
+> as such. See `docs/decisions/0010-renderer-submission-and-binding-layout.md`.
 
 ## Table of Contents
 
@@ -58,7 +66,7 @@ This document covers the entire graphics subsystem: the DirectX 12 fundamentals,
   - [The PBR Pixel Shader](#the-pbr-pixel-shader)
   - [Analytic Environment Lighting (IBL)](#analytic-environment-lighting-ibl)
   - [Tone Mapping and Gamma Correction](#tone-mapping-and-gamma-correction)
-  - [Model Transform API](#model-transform-api)
+  - [Draw Submission API](#draw-submission-api)
 - [Transparency](#transparency)
   - [Alpha Modes](#alpha-modes)
   - [Blend State and PSO Variants](#blend-state-and-pso-variants)
@@ -91,7 +99,7 @@ Think of it like this: DX11 is an automatic transmission — easier to drive but
 
 ### The Frame Lifecycle
 
-MyEngine uses double buffering (`kFrameCount = 2`). Each frame follows this pattern:
+MyEngine uses double buffering (`kRhiFrameCount = 2`). Each frame follows this pattern:
 
 ```
 Frame N begins:
@@ -141,18 +149,29 @@ MyEngine uses a **shader-visible** CBV/SRV/UAV heap (4 MB, arena-backed) for res
 
 A root signature defines how resources are bound to shader stages. It is like a function signature for the shader: it declares what parameters (constant buffers, textures, samplers) the shader expects and where to find them.
 
-MyEngine has two root signature layouts, selected via `PipelineDesc::root_layout`:
+Since ADR-0010 the RHI no longer hardcodes renderer-specific layouts. `PipelineDesc::bindings` carries a **`BindingLayout`** — just two counts — and the RHI derives the root signature from them generically:
 
-**Default layout (`RootLayout::Default`)** — 4 root parameters, used by the Blinn-Phong model pipeline, cube pipeline, and shadow pipeline:
+```cpp
+struct BindingLayout {
+    u32 cbv_count       = 2;  // root CBVs b0..b(N-1), bound at slots [0, N)
+    u32 srv_table_count = 2;  // single-SRV tables t0..t(M-1), at slots [N, N+M)
+};
+```
+
+The slot convention is fixed: root parameters `[0, cbv_count)` are root CBVs for registers `b0..bN-1` (bind with `set_constant_buffer(slot, …)`), and parameters `[cbv_count, cbv_count + srv_table_count)` are single-SRV descriptor tables for registers `t0..tM-1` (bind with `set_texture(slot, …)`). Identical layouts (including static-sampler state) share one root signature through an internal **dedupe cache**, so e.g. all four PBR PSO variants reference a single root signature object.
+
+The two layouts currently in use:
+
+**`{2, 2}`** — cube and shadow pipelines:
 
 | Slot | Type | Register | Content |
 |------|------|----------|---------|
-| 0 | Root CBV | b0 | Per-frame data (view, projection, lights) |
+| 0 | Root CBV | b0 | Per-frame data (MVP for the cube; light view-proj for shadow) |
 | 1 | Root CBV | b1 | Per-object data (model matrix, normal matrix) |
-| 2 | Descriptor table | t0 | Albedo texture |
-| 3 | Descriptor table | t1 | Shadow map |
+| 2 | Descriptor table | t0 | Albedo texture (cube) |
+| 3 | Descriptor table | t1 | — (unused) |
 
-**PBR layout (`RootLayout::PBR`)** — 9 root parameters, used by the PBR pipeline:
+**`{3, 6}`** — the PBR pipeline:
 
 | Slot | Type | Register | Content |
 |------|------|----------|---------|
@@ -166,11 +185,11 @@ MyEngine has two root signature layouts, selected via `PipelineDesc::root_layout
 | 7 | Descriptor table | t4 | Emissive texture |
 | 8 | Descriptor table | t5 | Shadow map (comparison depth) |
 
-Both layouts share the same two static samplers:
-- **s0:** Sampler for material textures. Both the **filter mode** (point / linear / anisotropic) and the **address mode** (wrap / clamp / mirror) are configurable per pipeline via `PipelineDesc::sampler_filter` and `PipelineDesc::sampler_address`. The PBR pipeline picks the address mode from the loaded model's dominant glTF sampler wrap mode (rebuilding its PSOs at load time if it differs).
+Every root signature carries the same two static samplers:
+- **s0:** Sampler for material textures. Both the **filter mode** (point / linear / anisotropic) and the **address mode** (wrap / clamp / mirror) are configurable per pipeline via `PipelineDesc::sampler_filter` and `PipelineDesc::sampler_address`. The PBR path builds a PSO block **lazily per address mode** the first time a model needs it, so models with different glTF wrap modes coexist.
 - **s1:** Comparison sampler (for shadow map PCF sampling).
 
-A **root CBV** is a constant buffer bound directly by GPU virtual address — no descriptor needed, so it is slightly faster than going through a descriptor table.
+A **root CBV** is a constant buffer bound directly by GPU virtual address — no descriptor needed, so it is slightly faster than going through a descriptor table. Since ADR-0010 a root CBV can be bound at a **256-byte-aligned offset** into a buffer (`set_constant_buffer(slot, buffer, offset)`), which is what the per-frame upload ring uses to give every draw its own constants from one big buffer.
 
 ### Pipeline State Objects (PSOs)
 
@@ -178,11 +197,12 @@ A PSO bundles all GPU state needed for rendering: vertex and pixel shaders, inpu
 
 DX12 requires PSOs to be created up front (not modified on the fly). This is a departure from DX11, where individual states could be changed independently. The benefit is that the GPU driver can pre-compile and optimize the entire pipeline configuration at creation time, avoiding runtime overhead.
 
-MyEngine creates PSOs at initialization:
-- **Cube pipeline:** Vertex + pixel shader for the spinning textured cube (Phase 1 fallback), no culling.
-- **Model pipeline:** Vertex + pixel shader for lit geometry (Blinn-Phong), back-face culling, depth test/write enabled, linear texture sampling.
-- **Shadow pipeline:** Vertex shader only (no pixel shader — depth-only rendering), back-face culling, depth bias enabled.
-- **PBR pipelines:** Vertex + pixel shader for Cook-Torrance BRDF rendering (`pbr_vs.hlsl` / `pbr_ps.hlsl`), depth test/write enabled, linear texture sampling, `RootLayout::PBR` (9 root parameters). Because cull mode and blend state are baked into the PSO, the renderer builds a **2×2 matrix of variants** — `{cull Back, cull None} × {Opaque, AlphaBlend}` — and selects one per sub-mesh from the material's `double_sided` and `alpha_mode`. Activated automatically when a model is loaded while the PBR shaders are present. See [Transparency](#transparency).
+MyEngine's pipelines:
+- **Cube pipeline** (created at init): Vertex + pixel shader for the spinning textured cube — the empty-scene fallback and golden-image baseline — no culling.
+- **Shadow pipeline** (created at init): Vertex shader only (no pixel shader — depth-only rendering), back-face culling, depth bias enabled.
+- **PBR pipelines** (built lazily): Vertex + pixel shader for Cook-Torrance BRDF rendering (`pbr_vs.hlsl` / `pbr_ps.hlsl`), depth test/write enabled, linear texture sampling, `BindingLayout{3, 6}`. Because cull mode and blend state are baked into the PSO, the renderer builds a **2×2 block of variants** — `{cull Back, cull None} × {Opaque, AlphaBlend}` — and selects one per sub-mesh from the material's `double_sided` and `alpha_mode`. One block exists **per static-sampler address mode** (wrap/clamp/mirror), built the first time a loaded model needs that mode. See [Transparency](#transparency).
+
+(The Phase 3 Blinn-Phong "model pipeline" was retired by ADR-0010; PBR is the only model path.)
 
 ### Debug Layer, GPU Validation, and DRED
 
@@ -202,11 +222,13 @@ The debug layer also sets `SetBreakOnSeverity` for CORRUPTION (always) and ERROR
 
 ### Why an RHI?
 
-Phase 1 implemented everything directly against DX12 COM objects in `renderer_dx12.cpp`. Phase 3 introduced the RHI (Render Hardware Interface) to separate the "what to do" from the "how to do it on DX12":
+Phase 1 implemented everything directly against DX12 COM objects in the renderer source file. Phase 3 introduced the RHI (Render Hardware Interface) to separate the "what to do" from the "how to do it on DX12":
 
-- **Clean separation of concerns.** The `Renderer` describes what to render (set camera, draw model, shadow pass). The `RhiDevice` executes the low-level GPU commands.
+- **Clean separation of concerns.** The `Renderer` describes what to render (set camera, submit models, shadow pass). The `RhiDevice` executes the low-level GPU commands.
 - **Testability.** The render graph can be unit-tested against the RHI's handle-based API without creating a real GPU device.
 - **Future backend support.** If a Vulkan backend is added, only `rhi_dx12.cpp` would be replaced — the `Renderer` and render graph would not change.
+
+Since ADR-0010 this separation is complete in practice: the high-level renderer lives in `renderer.cpp` (renamed from `renderer_dx12.cpp`) and contains **no D3D12 or Win32 usage at all** — `rhi_dx12.cpp` is the only file in `ge_gfx` that includes `<windows.h>`/`<d3d12.h>`.
 
 ### Handle-Based Resource Management
 
@@ -248,17 +270,25 @@ void clear_depth(TextureHandle ds, f32 depth);
 void set_pipeline(PipelineHandle);
 void set_vertex_buffer(BufferHandle, u32 stride);
 void set_index_buffer(BufferHandle, Format);
-void set_constant_buffer(u32 slot, BufferHandle);
+void set_constant_buffer(u32 slot, BufferHandle, u32 offset = 0); // offset: 256-aligned
 void set_texture(u32 slot, TextureHandle);
 void draw_indexed(u32 index_count, u32 start_index, i32 base_vertex);
 ```
 
+Invalid or stale handles trip a `GE_ASSERT` in command recording (and the call is skipped gracefully in release) — a silently dropped draw is much harder to diagnose than an assert.
+
 **Frame management:**
 ```cpp
-void begin_frame();        // Wait for frame slot, reset allocator/list
+void begin_frame();        // Wait for frame slot's fence, reset allocator/list
 void end_frame();          // Close and submit command list
 void present(bool vsync);  // Swap chain present + signal fence
+u32  frame_index();        // Current frame slot in [0, kRhiFrameCount) —
+                           // the only sanctioned way to pick per-frame resources
+void wait_idle();          // Block until the GPU is idle (before destroying
+                           // resources that in-flight frames may reference)
 ```
+
+**Uploads and heaps.** Buffers created with `cpu_visible = false` live on the **DEFAULT heap** (VRAM): their `initial_data` is staged through a temporary upload buffer and copied on a **dedicated upload command list**, so static vertex/index data is read from VRAM every frame instead of streaming across PCIe from system memory. The same upload list handles texture uploads and back-buffer readback — resource creation never touches the frame command list, so it is safe mid-frame. CPU-visible buffers (constant buffers, the upload ring) stay on the UPLOAD heap and are written through `map_buffer()`.
 
 ### The RHI Type System (`rhi_types.h`)
 
@@ -268,7 +298,9 @@ All RHI types are plain data — no OS or DX12 headers leak through. This file d
 - **Usage enums:** How a buffer or texture will be used (`Vertex`, `Index`, `Constant`, `ShaderResource`, `DepthStencil`, etc.).
 - **ResourceState enum:** For barrier transitions (`RenderTarget`, `PixelShaderResource`, `DepthWrite`, `Present`, etc.).
 - **State enums:** `CullMode`, `FillMode`, `CompareFunc`, `FilterMode`, `AddressMode` (wrap/clamp/mirror), and `BlendMode` (`Opaque`, `AlphaBlend`).
-- **Descriptor structs:** `BufferDesc`, `TextureDesc`, `ShaderDesc`, `PipelineDesc` — all the parameters needed to create a resource. `PipelineDesc` carries `blend_mode` and `sampler_address` alongside the shader/state fields.
+- **`BindingLayout`:** the CBV / SRV-table counts a pipeline's root signature is derived from (see [Root Signatures](#root-signatures)).
+- **Descriptor structs:** `BufferDesc`, `TextureDesc`, `ShaderDesc`, `PipelineDesc` — all the parameters needed to create a resource. `PipelineDesc` carries `blend_mode`, `sampler_address`, and `bindings` alongside the shader/state fields.
+- **`kRhiFrameCount`:** the number of frames in flight (2), shared by the RHI and any caller keeping per-frame CPU-writable resources (like the renderer's upload ring).
 
 ---
 
@@ -375,7 +407,7 @@ Two UV sets are carried so a material can reference either `TEXCOORD_0` or `TEXC
 
 The `tangent.w` component encodes the **bitangent sign**: the bitangent is reconstructed in the shader as `cross(normal, tangent.xyz) * tangent.w`. This is the convention used by glTF 2.0 and avoids storing the redundant third vector.
 
-The Blinn-Phong and shadow pipelines declare only the first three elements in their input layouts (`position`/`normal`/`uv` at offsets 0/12/24) — those offsets are deliberately fixed so growing the vertex did not disturb them. Only the PBR pipeline declares the full layout:
+The depth-only shadow pipeline declares only the first three elements in its input layout (`position`/`normal`/`uv` at offsets 0/12/24) — those offsets are deliberately fixed so growing the vertex did not disturb them. Only the PBR pipeline declares the full layout:
 - `POSITION`  : `R32G32B32_FLOAT`   at offset 0
 - `NORMAL`    : `R32G32B32_FLOAT`   at offset 12
 - `TEXCOORD0` : `R32G32_FLOAT`      at offset 24
@@ -501,8 +533,8 @@ The engine uses the **cgltf** library (header-only, MIT license, vendored under 
   Extract indices:       Convert cgltf accessors → u32[]
        |
        v
-  Create GPU buffers:    rhi.create_buffer(vertex_data)
-                         rhi.create_buffer(index_data)
+  Create GPU buffers:    rhi.create_buffer(vertex_data)   [DEFAULT heap:
+                         rhi.create_buffer(index_data)     staged upload to VRAM]
        |
        v
   Build sub-meshes:      Map primitives → ge::gfx::SubMesh[] (+ centroid)
@@ -594,6 +626,12 @@ The controller uses the camera's own forward and right vectors for movement, so 
 
 ## Forward Lighting with Blinn-Phong
 
+> **Historical / study material.** The dedicated Blinn-Phong model pipeline
+> (`model_vs.hlsl` / `model_ps.hlsl`) was retired by ADR-0010 — PBR is the
+> only model path now. The lighting *theory* below is kept because it is the
+> foundation the PBR section builds on, and the per-frame constant-buffer
+> layout shown here is still exactly what the PBR shaders consume.
+
 ### What is Forward Rendering?
 
 In forward rendering, each object is drawn once (or once per light), and the lighting calculation happens in the pixel shader during the draw call. This is the simplest rendering approach and is efficient for scenes with few lights.
@@ -663,9 +701,9 @@ attenuation *= attenuation;  // Squared for smoother falloff
 
 ### Constant Buffer Layout
 
-The shader receives lighting data through two constant buffers:
+The shader receives lighting data through two constant buffers. Since ADR-0010 both are allocated per frame from the **upload ring** (see [Draw Submission API](#draw-submission-api)) rather than from dedicated buffers:
 
-**Per-frame CB (b0)** — set once per frame, contains camera and light data:
+**Per-frame CB (b0)** — written once per frame, contains camera and light data:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -681,7 +719,7 @@ The shader receives lighting data through two constant buffers:
 | `shadow_enabled` | `float` | 1.0 if shadows are active |
 | `light_view_proj` | `float4x4` | Light's view-projection matrix (for shadows) |
 
-**Per-object CB (b1)** — set once per object, contains the model transform:
+**Per-object CB (b1)** — one ring allocation per submitted instance, contains the instance transform:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -692,7 +730,7 @@ The normal matrix is needed because normals must be transformed by the inverse-t
 
 ### The Vertex Shader
 
-The vertex shader (`model_vs.hlsl`) transforms vertices from model space to clip space:
+The (retired) Blinn-Phong vertex shader transformed vertices from model space to clip space — the PBR vertex shader does the same, plus the tangent frame:
 
 ```hlsl
 VSOutput main(VSInput input) {
@@ -711,7 +749,7 @@ World position and normal are passed to the pixel shader as interpolated values 
 
 ### The Pixel Shader
 
-The pixel shader (`model_ps.hlsl`) evaluates the lighting model for each pixel:
+The (retired) Blinn-Phong pixel shader evaluated the lighting model for each pixel:
 
 1. Sample the albedo texture.
 2. Normalize the interpolated normal (interpolation can denormalize it).
@@ -877,7 +915,7 @@ F0 is the surface's reflectance at normal incidence: `lerp(0.04, base_color, met
 
 ### PBR Root Signature
 
-The PBR pipeline uses `RootLayout::PBR` (9 root parameters). See the [Root Signatures](#root-signatures) section for the full binding table. The key addition is **slot 2 (b2)**, the per-material constant buffer, which carries material scalars and texture-presence flags that let the shader avoid sampling missing textures.
+The PBR pipeline uses `BindingLayout{3, 6}` (9 root parameters). See the [Root Signatures](#root-signatures) section for the full binding table. The key addition is **slot 2 (b2)**, the per-material constant buffer, which carries material scalars and texture-presence flags that let the shader avoid sampling missing textures.
 
 ### Per-Material Constant Buffer
 
@@ -901,7 +939,7 @@ cbuffer PerMaterial : register(b2) {
 };  // 240 bytes (fits the 256-byte constant buffer)
 ```
 
-Scalars are packed into `float4` rows to respect HLSL's 16-byte cbuffer alignment, and boolean texture-presence flags are stored as `float` (0.0 / 1.0). `alpha_mode` is a float enum (0 = opaque, 1 = mask, 2 = blend). Each of the five maps carries its own `TexXform` so the pixel shader can transform and UV-select per texture. The whole buffer is filled once when the model loads (`create_pbr_material_cbs`) and never changes.
+Scalars are packed into `float4` rows to respect HLSL's 16-byte cbuffer alignment, and boolean texture-presence flags are stored as `float` (0.0 / 1.0). `alpha_mode` is a float enum (0 = opaque, 1 = mask, 2 = blend). Each of the five maps carries its own `TexXform` so the pixel shader can transform and UV-select per texture. Each loaded model owns one such buffer per material, filled once at load time (`create_material_cbs`) and never changed.
 
 ### The PBR Vertex Shader
 
@@ -917,7 +955,7 @@ output.uv1        = input.uv1;   // TEXCOORD1
 output.color      = input.color; // COLOR_0
 ```
 
-The tangent and bitangent are world-space vectors that form the columns of the TBN matrix used in the pixel shader for normal mapping. Because the model's world transform is baked into the vertex data at load time, `model` and `normal_matrix` here carry only the per-frame `set_model_transform` value (identity by default).
+The tangent and bitangent are world-space vectors that form the columns of the TBN matrix used in the pixel shader for normal mapping. Because the model's glTF node transforms are baked into the vertex data at load time, `model` and `normal_matrix` here carry only the per-instance transform passed to `submit()` (see [Draw Submission API](#draw-submission-api)).
 
 ### The PBR Pixel Shader
 
@@ -981,25 +1019,39 @@ result = pow(max(result, 0.0), 1.0 / 2.2);
 
 The render target format is `R8G8B8A8_UNORM` (not `_SRGB`), so gamma correction must be applied explicitly in the shader. Input textures that are authored in sRGB space (base colour, emissive) are converted to linear before any math via `pow(c, 2.2)`.
 
-### Model Transform API
+### Draw Submission API
+
+Since ADR-0010 the renderer is a multi-model scene renderer with an immediate-mode draw list:
 
 ```cpp
-// Set the model-to-world matrix for the currently loaded model.
-// For pure rotations the normal matrix equals the rotation itself
-// (inverse-transpose of an orthogonal matrix is the matrix itself).
-void Renderer::set_model_transform(const mat4& transform);
+// Load a glTF model; returns an id for submit(), or kInvalidModelId.
+// Up to 16 models can be loaded concurrently, each with its own materials.
+ModelId Renderer::load_model(const char* path, ge::Allocator alloc);
+void    Renderer::unload_model(ModelId id);
+
+// Submit one instance of a loaded model for this frame. Valid between
+// begin_frame() and end_frame(); submissions do not persist across frames.
+void Renderer::submit(ModelId id, const mat4& transform);
 ```
 
-Call `set_model_transform` each frame before `begin_frame` to animate the model. The transform is passed to the shadow pass, PBR pass, and Blinn-Phong pass via the per-object constant buffer. The renderer starts with `mat4_identity()` and keeps the last transform set — there is no automatic reset.
+`begin_frame(dt)` acquires the frame slot and clears the draw list; `end_frame()` renders everything submitted (shadow pass then PBR pass over the draw list) and presents. If nothing was submitted, the built-in reference cube is drawn instead (the golden-image baseline and empty-scene placeholder).
 
-**Example — Y-axis rotation:**
+Each submitted instance gets its own per-object constant block (model matrix + inverse-transpose normal matrix, so non-uniform scale stays correct), bump-allocated from the **upload ring**: one persistently-mapped upload buffer per frame in flight (1 MiB each), reset every frame, handed out in 256-byte-aligned chunks and bound by offset. The shadow and PBR passes share the same per-object allocations. Because every draw owns distinct GPU addresses, no draw can overwrite another's constants — and because `RhiDevice::begin_frame()` fences the frame slot, the CPU never writes a ring buffer the GPU is still reading.
+
+**Example — several spinning instances of two models:**
 
 ```cpp
+ModelId box    = renderer.load_model("assets/models/box.glb", alloc);
+ModelId helmet = renderer.load_model("assets/models/DamagedHelmet.glb", alloc);
+
 float time = 0.0f;
 while (running) {
     time += dt;
-    renderer.set_model_transform(mat4_rotation_y(time));
     renderer.begin_frame(dt);
+    for (int i = 0; i < 5; ++i)
+        renderer.submit(box, mat4_rotation_y(time + i) *
+                             mat4_translation({(i - 2) * 2.0f, 0, 0}));
+    renderer.submit(helmet, mat4_rotation_y(time));
     renderer.end_frame();
 }
 ```
@@ -1034,12 +1086,12 @@ The `AlphaBlend` variant uses straight (non-premultiplied) alpha — `SrcBlend =
 
 Alpha blending is order-dependent: `over` compositing is not commutative, so transparent surfaces must be drawn far-to-near. Each frame the PBR pass:
 
-1. Partitions sub-meshes into an **opaque/masked** list and a **blended** list.
+1. Partitions all **(instance, sub-mesh)** pairs across the draw list into an **opaque/masked** list and a **blended** list.
 2. Draws the opaque/masked list first (depth write on), laying down the depth buffer.
-3. Sorts the blended list by **view-space centroid depth** — each `SubMesh` centroid is transformed by `model_transform * view` and sorted on the resulting `z` (far first).
+3. Sorts the blended list by **view-space centroid depth** — each `SubMesh` centroid is transformed by its instance's `transform * view` and sorted on the resulting `z` (far first).
 4. Draws the blended list back-to-front.
 
-This is correct for the single-model, convex-ish case the renderer targets today. Order-independent transparency (OIT) and per-triangle sorting are noted as future work; a full scene-wide transparent sort arrives with the world/scene layer.
+The sort spans every submitted instance of every model, so transparent sub-meshes from different models interleave correctly at the centroid level. Order-independent transparency (OIT) and per-triangle sorting are noted as future work.
 
 ### Double-Sided Materials
 

@@ -63,8 +63,10 @@ int main() {
         .enable_debug_layer = true  // (Debug builds)
     });
 
-    // 7. Load content
-    renderer.load_model("assets/models/DamagedHelmet.glb", perm.allocator());
+    // 7. Load content — load_model returns a ModelId used by submit() each
+    //    frame (ADR-0010); kInvalidModelId on failure.
+    gfx::ModelId helmet =
+        renderer.load_model("assets/models/DamagedHelmet.glb", perm.allocator());
 
     // 8. World + physics — Phase 4/5 additions
     world::Scene scene;
@@ -74,8 +76,8 @@ int main() {
     phys.init(16, perm.allocator());
 
     // Static ground the character falls onto and walks on. No visual
-    // representation yet — the renderer only draws the loaded glTF model,
-    // so this is a physics-only volume (see 09-physics-engine.md).
+    // representation yet — no model is submitted for it, so this is a
+    // physics-only volume (see 09-physics-engine.md).
     phys.add_body(physics::make_box_body({0, -1, 0}, {20, 1, 20}, quat_identity(), 0.0f));
 
     // The player: a rotation-locked capsule rigid body.
@@ -249,11 +251,12 @@ Each frame in the sandbox follows this sequence:
        |
 8. Chase camera derived from the player's (now-updated) Transform
        |
-9. renderer.set_camera(...), renderer.set_model_transform(...)
+9. renderer.set_camera(...)
        |
 10. GE_PROFILE_SCOPE("render")
-    renderer.begin_frame(dt)
-    renderer.end_frame()
+    renderer.begin_frame(dt)                    — acquire frame slot, reset draw list
+    renderer.submit(helmet, trs(player_xform))  — one call per visible instance
+    renderer.end_frame()                        — build graph, render, present
        |
 11. profiler().end_frame()
        |
@@ -331,8 +334,9 @@ follow_cam.pitch = cc->pitch;
 vec3 fwd = follow_cam.forward();
 follow_cam.position = pt->position - fwd * 3.5f + vec3{0, 1.0f, 0};  // behind and above
 renderer.set_camera(follow_cam);
-renderer.set_model_transform(trs(pt->position, pt->rotation, pt->scale));
 ```
+
+The player model itself is drawn by submitting it with the same `Transform` inside the render block: `renderer.submit(helmet, trs(pt->position, pt->rotation, pt->scale))` between `begin_frame()` and `end_frame()`.
 
 Because this runs *after* `system_sync_transform_from_rigidbody()`, `pt->position` already reflects this frame's physics step — the camera and the rendered model are never a frame behind the simulation.
 
@@ -340,7 +344,7 @@ Because this runs *after* `system_sync_transform_from_rigidbody()`, `pt->positio
 
 ## FPS Counter and Profiling
 
-The sandbox tracks frame rate using a simple counter, and — since Phase 5 — also logs the player's height once a second, which turned out to be a useful zero-cost debugging aid: there is no rendered ground plane yet (the renderer only draws the loaded glTF model), so this log line is the easiest way to confirm the character is actually falling and settling under gravity rather than floating or sinking through the floor.
+The sandbox tracks frame rate using a simple counter, and — since Phase 5 — also logs the player's height once a second, which turned out to be a useful zero-cost debugging aid: there is no rendered ground plane yet (the ground is a physics-only box with no model submitted for it), so this log line is the easiest way to confirm the character is actually falling and settling under gravity rather than floating or sinking through the floor.
 
 ```cpp
 f64 fps_timer = 0.0;
@@ -411,37 +415,42 @@ CPU Timeline:
   |
   |  chase camera recomputed from player Transform + look angles
   |  renderer.set_camera(camera)
-  |  renderer.set_model_transform(trs(player_transform))
   |
   |  renderer.begin_frame(dt):
   |    rhi.begin_frame()
   |      Wait for frame slot fence  → ensures GPU finished frame N-2
-  |      Reset command allocator
-  |      Reset command list
+  |      Reset command allocator + command list
+  |    upload ring reset (cursor → 0), draw list cleared
+  |
+  |  renderer.submit(model_id, transform)   → one DrawItem per visible instance
+  |
+  |  renderer.end_frame():
+  |    Per submitted instance: per-object CB (model + normal matrix)
+  |      bump-allocated from the upload ring (256-aligned offset)
   |
   |    Build render graph:
-  |      Import back_buffer (Present)
-  |      Import shadow_map (PixelShaderResource)
+  |      Import back_buffer (Present), depth, shadow_map
   |      Add shadow pass (writes shadow_map as DepthWrite)
-  |      Add main pass (reads shadow_map, writes back_buffer)
+  |      Add PBR pass (reads shadow_map, writes back_buffer)
+  |          — or the reference-cube pass if the draw list is empty
   |      Set final state: back_buffer → Present
   |
   |    graph.compile()             → barrier list generated
   |    graph.execute(rhi):
-  |      Barrier: shadow_map PSR → DepthWrite
   |      Shadow pass callback:
-  |        set pipeline (shadow)
-  |        set viewport/scissor (2048x2048)
-  |        clear depth
-  |        for each sub-mesh: set buffers, set CBs, draw_indexed
+  |        set pipeline (shadow), viewport/scissor (2048x2048), clear depth
+  |        for each draw item: bind its VB/IB (skipped if unchanged),
+  |          bind its per-object CB by ring offset, draw all sub-meshes
   |      Barrier: shadow_map DepthWrite → PSR
   |      Barrier: back_buffer Present → RenderTarget
-  |      Main pass callback:
-  |        set pipeline (PBR or model)
-  |        set viewport/scissor (window size)
-  |        clear render target + depth
-  |        set per-frame CB (camera, lights)
-  |        for each sub-mesh: set material texture(s), set per-object CB, draw_indexed
+  |      PBR pass callback:
+  |        viewport/scissor (window size), clear render target + depth
+  |        per-frame CB (camera, lights) allocated from the ring
+  |        partition (instance, sub-mesh) pairs → opaque / transparent
+  |        sort transparent far→near by view-space centroid
+  |        for each pair: set PSO variant (cull × blend × address mode,
+  |          skipped if unchanged), bind CBs (b0 frame, b1 object, b2
+  |          material) + 6 textures, draw_indexed
   |      Barrier: back_buffer RenderTarget → Present
   |
   |    rhi.end_frame()              → command list closed and submitted

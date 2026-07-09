@@ -17,6 +17,12 @@ follow the upkeep rules at the bottom.
 - **`docs/decisions/NNNN-title.md`** — Architecture Decision Records (ADRs):
   append-only, one per cross-cutting decision, capturing the rationale you will
   want months later. Indexed in `docs/decisions/README.md`.
+- **`docs/documentation/NN-topic.md`** — the reference manual / study
+  material: explains each implemented system and its underlying concepts from
+  first principles. Unlike phase docs (historical records of a phase's
+  design), these describe the engine **as it currently is** and must be
+  updated when a change invalidates them. Indexed in
+  `docs/documentation/README.md`.
 
 ## Why it is split this way
 
@@ -41,3 +47,7 @@ do not drift out of sync.
 4. Update statuses as work lands: the phase-doc header, the `plan.md` Status log
    and module checklist, and any ADR superseded by a newer one.
 5. New phase docs and ADRs follow the templates and the `NN` / `NNNN` numbering.
+6. When a change invalidates something in `docs/documentation/` (an API, a
+   pipeline, a data layout), update the affected document in the same piece of
+   work. Phase docs record history and are left alone; the reference manual
+   describes the present and must never silently rot.

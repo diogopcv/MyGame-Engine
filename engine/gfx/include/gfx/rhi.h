@@ -23,6 +23,14 @@ public:
     /** @brief Flush the GPU and release all resources. */
     void shutdown();
 
+    /**
+     * @brief Block until the GPU has finished all submitted work.
+     *
+     * Use before destroying resources that may still be referenced by
+     * in-flight frames. Expensive — never call in the steady-state frame loop.
+     */
+    void wait_idle();
+
     // -- Resource creation / destruction ------------------------------------
 
     /**
@@ -89,6 +97,16 @@ public:
     /** @brief Handle a window resize (flush, resize swapchain, recreate targets). */
     void resize(u32 width, u32 height);
 
+    /**
+     * @brief Index of the current frame slot, in `[0, kRhiFrameCount)`.
+     *
+     * Valid after begin_frame().  Use it to select per-frame CPU-writable
+     * resources (constant-buffer rings etc.): begin_frame() waits on the
+     * slot's fence, so writing resources indexed by this value never races
+     * the GPU.
+     */
+    u32 frame_index() const;
+
     // -- Command recording --------------------------------------------------
 
     /** @brief Insert a resource barrier (texture state transition). */
@@ -112,8 +130,14 @@ public:
     /** @brief Bind an index buffer. */
     void set_index_buffer(BufferHandle h, Format format);
 
-    /** @brief Bind a constant buffer to a root parameter slot. */
-    void set_constant_buffer(u32 slot, BufferHandle h);
+    /**
+     * @brief Bind a constant buffer to a root parameter slot.
+     * @param slot   Root parameter index (see BindingLayout slot convention).
+     * @param h      Buffer handle.
+     * @param offset Byte offset into the buffer; must be 256-byte aligned.
+     *               Enables sub-allocating many CBVs from one ring buffer.
+     */
+    void set_constant_buffer(u32 slot, BufferHandle h, u32 offset = 0);
 
     /** @brief Bind a texture SRV to a root parameter slot. */
     void set_texture(u32 slot, TextureHandle h);

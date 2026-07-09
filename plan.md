@@ -124,6 +124,10 @@ Accepted:
 - ADR-0007 — Reflection / type-system mechanism (Phase 2).
 - ADR-0008 — ECS storage model (Phase 4): sparse-set storage.
 - ADR-0009 — Scripting / iteration model (Phase 4): plain compiled C++ systems.
+- ADR-0010 — Renderer draw submission & generalized RHI binding layout
+  (between Phases 5 and 6): per-frame `submit(ModelId, mat4)` draw list +
+  upload-ring constants; `BindingLayout` replaces hardcoded root-signature
+  variants.
 
 Open:
 - Editor scope: engine+editor vs engine-only (open) — until decided, design as
@@ -607,5 +611,39 @@ lost, but they do not block any phase above.
   the `RigidBodyRef`-as-opaque-handle placement decision is a direct
   continuation of ADR-0009's "plain compiled C++ systems, glue lives with
   whichever code owns both sides" precedent, not a new one.
-- Next up: Phase 6 — Animation. See `docs/phases/06-animation.md` (currently
-  a stub; expand before starting, per the standard process).
+- 2026-07-09 Renderer architecture hardening (pre-Phase-6, ADR-0010 accepted):
+  multi-model draw-submission API (`load_model` returns a `ModelId`; per-frame
+  `submit(ModelId, mat4)` between `begin_frame`/`end_frame`; up to 16 loaded
+  models with per-model material CBs and lazily-built per-sampler-address PBR
+  PSO blocks). All dynamic constants now come from a per-frame-in-flight
+  persistently-mapped upload ring (256-aligned bump allocation, new
+  `RhiDevice::set_constant_buffer(slot, buffer, offset)`), fixing two latent
+  bugs: per-object CB last-write-wins between the shadow and PBR passes, and
+  frame slots being derived from a HandleTable index (`back_buffer().index %
+  2`) instead of the new `RhiDevice::frame_index()`. RHI: `RootLayout` enum
+  replaced by a generic `BindingLayout` (CBV + SRV-table counts) with a
+  root-signature dedupe cache; non-CPU-visible buffers moved to the DEFAULT
+  heap with staged uploads on a dedicated upload command list (also used for
+  texture uploads/readback, so resource creation can't clobber the frame
+  command list); swapchain descriptors use reserved heap indices so resize
+  can't collide with live user RTs/DSVs; GE_ASSERTs on invalid handles in
+  command recording. Platform: new `platform::executable_dir()` (UTF-8);
+  `renderer_dx12.cpp` renamed `renderer.cpp` — no `<windows.h>`/D3D usage
+  outside `rhi_dx12.cpp` in ge_gfx anymore (sandbox and gfx tests also
+  dropped their Win32 includes). Retired the Phase-3 Blinn-Phong fallback
+  path (`model_vs/ps.hlsl` deleted); PBR is the model path, the cube remains
+  the empty-scene/golden baseline. New multi-instance/multi-model smoke test
+  (5 spinning boxes + helmet in one frame). Verified: full CTest suite (6
+  executables) green including the unchanged golden cube image; sandbox run
+  ~8 s — helmet renders, capsule settles at player.y 0.89, ~100 FPS, clean
+  exit, 0 debug-layer errors.
+- 2026-07-09 Phase 6 design doc expanded (`docs/phases/06-animation.md`):
+  new `ge_anim` Layer 3 module plan (skeleton/clip/pose/state-machine/root
+  motion, depends on `ge_core` only), sibling-isolation contract with
+  `ge_gfx` (palettes cross as bare `mat4*` via the app, joint order = glTF
+  skin order), GPU-skinning decisions on top of ADR-0010 (`SkinnedVertex`,
+  `BindingLayout{4,6}`, palette from the upload ring, skinned shadow pass),
+  5 milestones, test plan, and the rigged-asset plan (gen_skinned_glb tool +
+  Khronos Fox).
+- Current: Phase 6 — Animation, Milestone 1 not yet started. See
+  `docs/phases/06-animation.md`.

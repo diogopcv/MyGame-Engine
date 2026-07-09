@@ -1,6 +1,7 @@
 #include "gfx/rhi.h"
 
 #include "core/log.h"
+#include "core/assert.h"
 #include "core/arena.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -16,12 +17,20 @@ namespace ge::gfx {
 
 using Microsoft::WRL::ComPtr;
 
-constexpr u32 kFrameCount       = 2;
+constexpr u32 kFrameCount       = kRhiFrameCount;
 constexpr u32 kMaxBuffers       = 1024;
 constexpr u32 kMaxTextures      = 512;
 constexpr u32 kMaxShaders       = 128;
 constexpr u32 kMaxPipelines     = 64;
 constexpr u32 kSrvHeapSize      = 512;
+constexpr u32 kMaxRootSignatures = 16;
+
+// Descriptor-heap indices below these values are reserved for swapchain
+// resources (back-buffer RTVs, swapchain depth DSV) and are re-used on
+// resize; dynamic allocation starts above them and is never reset, so a
+// resize can't hand out an index that a live user resource still owns.
+constexpr u32 kReservedRtvs = kFrameCount;
+constexpr u32 kReservedDsvs = 1;
 
 // ---------------------------------------------------------------------------
 // Internal resource structs stored in HandleTables
@@ -53,8 +62,22 @@ struct DX12Shader {
 
 struct DX12Pipeline {
     ComPtr<ID3D12PipelineState> pso;
+    ID3D12RootSignature*        root_signature = nullptr; ///< Owned by the root-signature cache.
+};
+
+/// One entry of the root-signature dedupe cache: pipelines with the same
+/// BindingLayout + static-sampler state share a single root signature.
+struct RootSignatureCacheEntry {
+    u32                         key = 0;
     ComPtr<ID3D12RootSignature> root_signature;
 };
+
+/// Cache key packing: binding counts + the static-sampler state baked into
+/// the root signature. All fields fit comfortably in 32 bits.
+static u32 root_signature_key(const BindingLayout& b, FilterMode filter, AddressMode address) {
+    return (b.cbv_count & 0xFF) | ((b.srv_table_count & 0xFF) << 8) |
+           (static_cast<u32>(filter) << 16) | (static_cast<u32>(address) << 24);
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -132,6 +155,10 @@ struct RhiDeviceImpl {
     ComPtr<IDXGISwapChain3>           swapchain;
     ComPtr<ID3D12CommandAllocator>    cmd_allocators[kFrameCount];
     ComPtr<ID3D12GraphicsCommandList> cmd_list;
+    // Dedicated allocator + list for resource uploads and readbacks, so they
+    // never touch the frame command list (safe to create resources mid-frame).
+    ComPtr<ID3D12CommandAllocator>    upload_allocator;
+    ComPtr<ID3D12GraphicsCommandList> upload_list;
     ComPtr<ID3D12Fence>               fence;
     ComPtr<ID3D12InfoQueue>           info_queue;
     HANDLE                            fence_event         = nullptr;
@@ -146,9 +173,13 @@ struct RhiDeviceImpl {
     u32 rtv_descriptor_size = 0;
     u32 dsv_descriptor_size = 0;
     u32 srv_descriptor_size = 0;
-    u32 next_rtv_index      = 0;
-    u32 next_dsv_index      = 0;
+    u32 next_rtv_index      = kReservedRtvs;
+    u32 next_dsv_index      = kReservedDsvs;
     u32 next_srv_index      = 0;
+
+    // Root-signature dedupe cache (see RootSignatureCacheEntry).
+    RootSignatureCacheEntry root_signatures[kMaxRootSignatures];
+    u32                     root_signature_count = 0;
 
     // Swapchain back buffers + depth (managed as texture handles)
     TextureHandle back_buffer_handles[kFrameCount];
@@ -206,6 +237,22 @@ struct RhiDeviceImpl {
     u32 alloc_dsv() { return next_dsv_index++; }
     u32 alloc_srv() { return next_srv_index++; }
 
+    /// Reset the upload list for recording copy/readback commands.
+    /// Safe at any time: uploads are always submitted + flushed before return,
+    /// so the allocator is never in flight.
+    void begin_upload() {
+        upload_allocator->Reset();
+        upload_list->Reset(upload_allocator.Get(), nullptr);
+    }
+
+    /// Submit the upload list and block until the GPU has finished it.
+    void end_upload() {
+        upload_list->Close();
+        ID3D12CommandList* lists[] = {upload_list.Get()};
+        queue->ExecuteCommandLists(1, lists);
+        flush();
+    }
+
     bool create_swapchain_resources() {
         for (u32 i = 0; i < kFrameCount; ++i) {
             DX12Texture tex{};
@@ -215,7 +262,8 @@ struct RhiDeviceImpl {
             tex.usage  = TextureUsage::RenderTarget;
             swapchain->GetBuffer(i, IID_PPV_ARGS(&tex.resource));
 
-            tex.rtv_index = alloc_rtv();
+            // Reserved descriptor slot, reused across resizes.
+            tex.rtv_index = i;
             device->CreateRenderTargetView(tex.resource.Get(), nullptr, rtv_cpu(tex.rtv_index));
 
             back_buffer_handles[i] = textures.add(tex);
@@ -254,7 +302,8 @@ struct RhiDeviceImpl {
             return false;
         }
 
-        tex.dsv_index = alloc_dsv();
+        // Reserved descriptor slot, reused across resizes.
+        tex.dsv_index = 0;
         D3D12_DEPTH_STENCIL_VIEW_DESC dsv_desc{};
         dsv_desc.Format        = DXGI_FORMAT_D32_FLOAT;
         dsv_desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
@@ -370,6 +419,21 @@ bool RhiDevice::init(const RhiDeviceDesc& desc) {
     }
     impl->cmd_list->Close();
 
+    if (!dx_check(impl->device->CreateCommandAllocator(
+            D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&impl->upload_allocator)),
+            "CreateCommandAllocator (upload)")) {
+        shutdown();
+        return false;
+    }
+    if (!dx_check(impl->device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                  impl->upload_allocator.Get(), nullptr,
+                  IID_PPV_ARGS(&impl->upload_list)),
+                  "CreateCommandList (upload)")) {
+        shutdown();
+        return false;
+    }
+    impl->upload_list->Close();
+
     // 6. Swapchain
     DXGI_SWAP_CHAIN_DESC1 sc_desc{};
     sc_desc.Width            = desc.width;
@@ -464,6 +528,12 @@ bool RhiDevice::init(const RhiDeviceDesc& desc) {
     return true;
 }
 
+void RhiDevice::wait_idle() {
+    auto* impl = static_cast<RhiDeviceImpl*>(impl_);
+    if (!impl || !impl->queue || !impl->fence) return;
+    impl->flush();
+}
+
 void RhiDevice::shutdown() {
     auto* impl = static_cast<RhiDeviceImpl*>(impl_);
     if (!impl) return;
@@ -492,38 +562,47 @@ void RhiDevice::shutdown() {
 // Resource creation
 // ---------------------------------------------------------------------------
 
-BufferHandle RhiDevice::create_buffer(const BufferDesc& desc) {
-    auto* impl = static_cast<RhiDeviceImpl*>(impl_);
-
-    D3D12_HEAP_PROPERTIES heap_props{};
-    D3D12_RESOURCE_STATES initial_state;
-
-    if (desc.cpu_visible || desc.usage == BufferUsage::Upload) {
-        heap_props.Type = D3D12_HEAP_TYPE_UPLOAD;
-        initial_state   = D3D12_RESOURCE_STATE_GENERIC_READ;
-    } else if (desc.usage == BufferUsage::Readback) {
-        heap_props.Type = D3D12_HEAP_TYPE_READBACK;
-        initial_state   = D3D12_RESOURCE_STATE_COPY_DEST;
-    } else {
-        heap_props.Type = D3D12_HEAP_TYPE_UPLOAD;
-        initial_state   = D3D12_RESOURCE_STATE_GENERIC_READ;
-    }
-
+/// Create a plain buffer resource description of @p size bytes.
+static D3D12_RESOURCE_DESC buffer_resource_desc(u64 size) {
     D3D12_RESOURCE_DESC res_desc{};
     res_desc.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
-    res_desc.Width            = desc.size;
+    res_desc.Width            = size;
     res_desc.Height           = 1;
     res_desc.DepthOrArraySize = 1;
     res_desc.MipLevels        = 1;
     res_desc.Format           = DXGI_FORMAT_UNKNOWN;
     res_desc.SampleDesc.Count = 1;
     res_desc.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    return res_desc;
+}
+
+BufferHandle RhiDevice::create_buffer(const BufferDesc& desc) {
+    auto* impl = static_cast<RhiDeviceImpl*>(impl_);
+
+    D3D12_HEAP_PROPERTIES heap_props{};
+    D3D12_RESOURCE_STATES initial_state;
 
     DX12Buffer buf{};
     buf.size        = desc.size;
     buf.usage       = desc.usage;
     buf.cpu_visible = desc.cpu_visible || desc.usage == BufferUsage::Upload ||
                       desc.usage == BufferUsage::Readback;
+
+    if (desc.usage == BufferUsage::Readback) {
+        heap_props.Type = D3D12_HEAP_TYPE_READBACK;
+        initial_state   = D3D12_RESOURCE_STATE_COPY_DEST;
+    } else if (buf.cpu_visible) {
+        heap_props.Type = D3D12_HEAP_TYPE_UPLOAD;
+        initial_state   = D3D12_RESOURCE_STATE_GENERIC_READ;
+    } else {
+        // GPU-only buffer (vertex/index data): default heap, uploaded through
+        // a staging buffer below. COMMON lets D3D12's implicit buffer state
+        // promotion/decay handle transitions without explicit barriers.
+        heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
+        initial_state   = D3D12_RESOURCE_STATE_COMMON;
+    }
+
+    D3D12_RESOURCE_DESC res_desc = buffer_resource_desc(desc.size);
 
     if (!dx_check(impl->device->CreateCommittedResource(
             &heap_props, D3D12_HEAP_FLAG_NONE, &res_desc, initial_state,
@@ -534,13 +613,37 @@ BufferHandle RhiDevice::create_buffer(const BufferDesc& desc) {
 
     buf.gpu_address = buf.resource->GetGPUVirtualAddress();
 
-    if (desc.initial_data && buf.cpu_visible) {
+    if (desc.initial_data && buf.cpu_visible && desc.usage != BufferUsage::Readback) {
         void* mapped = nullptr;
         const D3D12_RANGE no_read{0, 0};
         if (SUCCEEDED(buf.resource->Map(0, &no_read, &mapped))) {
             std::memcpy(mapped, desc.initial_data, desc.size);
             buf.resource->Unmap(0, nullptr);
         }
+    } else if (desc.initial_data && !buf.cpu_visible) {
+        // Stage through an upload buffer and copy on the dedicated upload list.
+        D3D12_HEAP_PROPERTIES staging_heap{};
+        staging_heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+        ComPtr<ID3D12Resource> staging;
+        if (!dx_check(impl->device->CreateCommittedResource(
+                &staging_heap, D3D12_HEAP_FLAG_NONE, &res_desc,
+                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&staging)),
+                "CreateCommittedResource (buffer staging)")) {
+            return {};
+        }
+
+        void* mapped = nullptr;
+        const D3D12_RANGE no_read{0, 0};
+        if (!dx_check(staging->Map(0, &no_read, &mapped), "Map (buffer staging)")) {
+            return {};
+        }
+        std::memcpy(mapped, desc.initial_data, desc.size);
+        staging->Unmap(0, nullptr);
+
+        impl->begin_upload();
+        impl->upload_list->CopyBufferRegion(buf.resource.Get(), 0, staging.Get(), 0, desc.size);
+        impl->end_upload();
     }
 
     return impl->buffers.add(buf);
@@ -675,7 +778,7 @@ TextureHandle RhiDevice::create_texture(const TextureDesc& desc) {
         }
         upload_buffer->Unmap(0, nullptr);
 
-        impl->cmd_list->Reset(impl->cmd_allocators[0].Get(), nullptr);
+        impl->begin_upload();
 
         D3D12_TEXTURE_COPY_LOCATION dst{};
         dst.pResource        = tex.resource.Get();
@@ -687,7 +790,7 @@ TextureHandle RhiDevice::create_texture(const TextureDesc& desc) {
         src.Type            = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
         src.PlacedFootprint = footprint;
 
-        impl->cmd_list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        impl->upload_list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
 
         D3D12_RESOURCE_BARRIER barrier{};
         barrier.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -695,12 +798,9 @@ TextureHandle RhiDevice::create_texture(const TextureDesc& desc) {
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
         barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        impl->cmd_list->ResourceBarrier(1, &barrier);
+        impl->upload_list->ResourceBarrier(1, &barrier);
 
-        impl->cmd_list->Close();
-        ID3D12CommandList* lists[] = {impl->cmd_list.Get()};
-        impl->queue->ExecuteCommandLists(1, lists);
-        impl->flush();
+        impl->end_upload();
     }
 
     return impl->textures.add(tex);
@@ -750,88 +850,82 @@ PipelineHandle RhiDevice::create_pipeline(const PipelineDesc& desc) {
     samplers[1].ShaderRegister   = 1;
     samplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
-    D3D12_ROOT_SIGNATURE_DESC rs_desc{};
-    rs_desc.NumStaticSamplers = _countof(samplers);
-    rs_desc.pStaticSamplers   = samplers;
-    rs_desc.Flags             = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
-
-    // -- Root parameters: Default layout (2 CBVs + 2 SRV tables) ----------------
-    D3D12_DESCRIPTOR_RANGE default_srv_ranges[2]{};
-    default_srv_ranges[0].RangeType          = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    default_srv_ranges[0].NumDescriptors     = 1;
-    default_srv_ranges[0].BaseShaderRegister = 0;
-    default_srv_ranges[0].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-
-    default_srv_ranges[1].RangeType          = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    default_srv_ranges[1].NumDescriptors     = 1;
-    default_srv_ranges[1].BaseShaderRegister = 1;
-    default_srv_ranges[1].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-
-    D3D12_ROOT_PARAMETER default_params[4]{};
-    default_params[0].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    default_params[0].Descriptor.ShaderRegister = 0;
-    default_params[0].ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
-    default_params[1].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    default_params[1].Descriptor.ShaderRegister = 1;
-    default_params[1].ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
-    default_params[2].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    default_params[2].DescriptorTable.NumDescriptorRanges = 1;
-    default_params[2].DescriptorTable.pDescriptorRanges   = &default_srv_ranges[0];
-    default_params[2].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
-    default_params[3].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    default_params[3].DescriptorTable.NumDescriptorRanges = 1;
-    default_params[3].DescriptorTable.pDescriptorRanges   = &default_srv_ranges[1];
-    default_params[3].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
-
-    // -- Root parameters: PBR layout (3 CBVs + 6 SRV tables) --------------------
-    // Slots 0-2: CBV b0 (per-frame), b1 (per-object), b2 (per-material)
-    // Slots 3-8: SRV t0 (base_color), t1 (metallic_roughness), t2 (normal),
-    //                 t3 (occlusion), t4 (emissive), t5 (shadow_map)
-    D3D12_DESCRIPTOR_RANGE pbr_srv_ranges[6]{};
-    for (u32 r = 0; r < 6; ++r) {
-        pbr_srv_ranges[r].RangeType          = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        pbr_srv_ranges[r].NumDescriptors     = 1;
-        pbr_srv_ranges[r].BaseShaderRegister = r;
-        pbr_srv_ranges[r].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
-    }
-
-    D3D12_ROOT_PARAMETER pbr_params[9]{};
-    for (u32 c = 0; c < 3; ++c) {
-        pbr_params[c].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
-        pbr_params[c].Descriptor.ShaderRegister = c;
-        pbr_params[c].Descriptor.RegisterSpace  = 0;
-        pbr_params[c].ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
-    }
-    for (u32 s = 0; s < 6; ++s) {
-        pbr_params[3 + s].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        pbr_params[3 + s].DescriptorTable.NumDescriptorRanges = 1;
-        pbr_params[3 + s].DescriptorTable.pDescriptorRanges   = &pbr_srv_ranges[s];
-        pbr_params[3 + s].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
-    }
-
-    if (desc.root_layout == RootLayout::PBR) {
-        rs_desc.NumParameters = _countof(pbr_params);
-        rs_desc.pParameters   = pbr_params;
-    } else {
-        rs_desc.NumParameters = _countof(default_params);
-        rs_desc.pParameters   = default_params;
-    }
-
-    ComPtr<ID3DBlob> sig_blob, err_blob;
-    HRESULT hr = D3D12SerializeRootSignature(&rs_desc, D3D_ROOT_SIGNATURE_VERSION_1,
-                                             &sig_blob, &err_blob);
-    if (FAILED(hr)) {
-        if (err_blob)
-            GE_ERROR("D3D12SerializeRootSignature: {}",
-                     static_cast<const char*>(err_blob->GetBufferPointer()));
+    // -- Root signature: derived from desc.bindings, deduped via the cache ------
+    // Slot convention (see BindingLayout): root params [0, cbv_count) are CBVs
+    // b0..bN-1; params [cbv_count, cbv_count+srv_table_count) are single-SRV
+    // tables t0..tM-1.
+    const BindingLayout& bindings = desc.bindings;
+    if (bindings.cbv_count > kMaxBindingCbvs ||
+        bindings.srv_table_count > kMaxBindingSrvTables) {
+        GE_ERROR("create_pipeline: BindingLayout exceeds limits ({} CBVs, {} SRV tables)",
+                 bindings.cbv_count, bindings.srv_table_count);
         return {};
     }
 
     DX12Pipeline pipe{};
-    if (!dx_check(impl->device->CreateRootSignature(0, sig_blob->GetBufferPointer(),
-                  sig_blob->GetBufferSize(), IID_PPV_ARGS(&pipe.root_signature)),
-                  "CreateRootSignature")) {
-        return {};
+    const u32 rs_key = root_signature_key(bindings, desc.sampler_filter, desc.sampler_address);
+    for (u32 i = 0; i < impl->root_signature_count; ++i) {
+        if (impl->root_signatures[i].key == rs_key) {
+            pipe.root_signature = impl->root_signatures[i].root_signature.Get();
+            break;
+        }
+    }
+
+    if (!pipe.root_signature) {
+        if (impl->root_signature_count >= kMaxRootSignatures) {
+            GE_ERROR("create_pipeline: root-signature cache full ({})", kMaxRootSignatures);
+            return {};
+        }
+
+        D3D12_DESCRIPTOR_RANGE srv_ranges[kMaxBindingSrvTables]{};
+        for (u32 r = 0; r < bindings.srv_table_count; ++r) {
+            srv_ranges[r].RangeType          = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+            srv_ranges[r].NumDescriptors     = 1;
+            srv_ranges[r].BaseShaderRegister = r;
+            srv_ranges[r].OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+        }
+
+        D3D12_ROOT_PARAMETER params[kMaxBindingCbvs + kMaxBindingSrvTables]{};
+        for (u32 c = 0; c < bindings.cbv_count; ++c) {
+            params[c].ParameterType             = D3D12_ROOT_PARAMETER_TYPE_CBV;
+            params[c].Descriptor.ShaderRegister = c;
+            params[c].Descriptor.RegisterSpace  = 0;
+            params[c].ShaderVisibility          = D3D12_SHADER_VISIBILITY_ALL;
+        }
+        for (u32 s = 0; s < bindings.srv_table_count; ++s) {
+            D3D12_ROOT_PARAMETER& p = params[bindings.cbv_count + s];
+            p.ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            p.DescriptorTable.NumDescriptorRanges = 1;
+            p.DescriptorTable.pDescriptorRanges   = &srv_ranges[s];
+            p.ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+        }
+
+        D3D12_ROOT_SIGNATURE_DESC rs_desc{};
+        rs_desc.NumParameters     = bindings.cbv_count + bindings.srv_table_count;
+        rs_desc.pParameters       = params;
+        rs_desc.NumStaticSamplers = _countof(samplers);
+        rs_desc.pStaticSamplers   = samplers;
+        rs_desc.Flags             = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+        ComPtr<ID3DBlob> sig_blob, err_blob;
+        HRESULT hr = D3D12SerializeRootSignature(&rs_desc, D3D_ROOT_SIGNATURE_VERSION_1,
+                                                 &sig_blob, &err_blob);
+        if (FAILED(hr)) {
+            if (err_blob)
+                GE_ERROR("D3D12SerializeRootSignature: {}",
+                         static_cast<const char*>(err_blob->GetBufferPointer()));
+            return {};
+        }
+
+        RootSignatureCacheEntry& entry = impl->root_signatures[impl->root_signature_count];
+        if (!dx_check(impl->device->CreateRootSignature(0, sig_blob->GetBufferPointer(),
+                      sig_blob->GetBufferSize(), IID_PPV_ARGS(&entry.root_signature)),
+                      "CreateRootSignature")) {
+            return {};
+        }
+        entry.key = rs_key;
+        ++impl->root_signature_count;
+        pipe.root_signature = entry.root_signature.Get();
     }
 
     // Input layout
@@ -882,7 +976,7 @@ PipelineHandle RhiDevice::create_pipeline(const PipelineDesc& desc) {
 
     // PSO
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pso_desc{};
-    pso_desc.pRootSignature        = pipe.root_signature.Get();
+    pso_desc.pRootSignature        = pipe.root_signature;
     pso_desc.VS                    = {vs->bytecode.data(), vs->bytecode.size()};
     if (ps) pso_desc.PS            = {ps->bytecode.data(), ps->bytecode.size()};
     pso_desc.InputLayout           = {input_elems.data(), static_cast<UINT>(input_elems.size())};
@@ -954,6 +1048,7 @@ void RhiDevice::update_buffer(BufferHandle h, const void* data, u32 size, u32 of
 void* RhiDevice::map_buffer(BufferHandle h) {
     auto* impl = static_cast<RhiDeviceImpl*>(impl_);
     DX12Buffer* buf = impl->buffers.get(h);
+    GE_ASSERT(buf == nullptr || buf->cpu_visible); // default-heap buffers cannot be mapped
     if (!buf) return nullptr;
 
     if (!buf->mapped) {
@@ -1030,9 +1125,9 @@ void RhiDevice::resize(u32 w, u32 h) {
         impl->textures.remove(impl->depth_handle);
     }
 
-    // Reset descriptor indices for swapchain resources
-    impl->next_rtv_index = 0;
-    impl->next_dsv_index = 0;
+    // Swapchain resources reuse their reserved descriptor slots (indices
+    // below kReservedRtvs/kReservedDsvs); dynamic counters are never reset,
+    // so live user render targets keep their descriptors across resizes.
 
     DXGI_SWAP_CHAIN_DESC desc{};
     impl->swapchain->GetDesc(&desc);
@@ -1103,15 +1198,17 @@ void RhiDevice::clear_depth(TextureHandle ds, f32 depth) {
 void RhiDevice::set_pipeline(PipelineHandle h) {
     auto* impl = static_cast<RhiDeviceImpl*>(impl_);
     DX12Pipeline* p = impl->pipelines.get(h);
+    GE_ASSERT(p != nullptr); // invalid/stale pipeline handle
     if (!p) return;
-    impl->cmd_list->SetGraphicsRootSignature(p->root_signature.Get());
+    impl->cmd_list->SetGraphicsRootSignature(p->root_signature);
     impl->cmd_list->SetPipelineState(p->pso.Get());
-    impl->bound_root_sig = p->root_signature.Get();
+    impl->bound_root_sig = p->root_signature;
 }
 
 void RhiDevice::set_vertex_buffer(BufferHandle h, u32 stride) {
     auto* impl = static_cast<RhiDeviceImpl*>(impl_);
     DX12Buffer* buf = impl->buffers.get(h);
+    GE_ASSERT(buf != nullptr); // invalid/stale buffer handle
     if (!buf) return;
 
     D3D12_VERTEX_BUFFER_VIEW vbv{};
@@ -1125,6 +1222,7 @@ void RhiDevice::set_vertex_buffer(BufferHandle h, u32 stride) {
 void RhiDevice::set_index_buffer(BufferHandle h, Format format) {
     auto* impl = static_cast<RhiDeviceImpl*>(impl_);
     DX12Buffer* buf = impl->buffers.get(h);
+    GE_ASSERT(buf != nullptr); // invalid/stale buffer handle
     if (!buf) return;
 
     D3D12_INDEX_BUFFER_VIEW ibv{};
@@ -1134,16 +1232,20 @@ void RhiDevice::set_index_buffer(BufferHandle h, Format format) {
     impl->cmd_list->IASetIndexBuffer(&ibv);
 }
 
-void RhiDevice::set_constant_buffer(u32 slot, BufferHandle h) {
+void RhiDevice::set_constant_buffer(u32 slot, BufferHandle h, u32 offset) {
     auto* impl = static_cast<RhiDeviceImpl*>(impl_);
     DX12Buffer* buf = impl->buffers.get(h);
+    GE_ASSERT(buf != nullptr);          // invalid/stale buffer handle
     if (!buf) return;
-    impl->cmd_list->SetGraphicsRootConstantBufferView(slot, buf->gpu_address);
+    GE_ASSERT((offset & 255u) == 0);    // CBV addresses must be 256-byte aligned
+    GE_ASSERT(offset < buf->size);
+    impl->cmd_list->SetGraphicsRootConstantBufferView(slot, buf->gpu_address + offset);
 }
 
 void RhiDevice::set_texture(u32 slot, TextureHandle h) {
     auto* impl = static_cast<RhiDeviceImpl*>(impl_);
     DX12Texture* t = impl->textures.get(h);
+    GE_ASSERT(t != nullptr && t->srv_index != ~0u); // invalid handle or texture has no SRV
     if (!t || t->srv_index == ~0u) return;
     impl->cmd_list->SetGraphicsRootDescriptorTable(slot, impl->srv_gpu(t->srv_index));
 }
@@ -1185,6 +1287,10 @@ u32 RhiDevice::width() const {
 
 u32 RhiDevice::height() const {
     return static_cast<const RhiDeviceImpl*>(impl_)->height;
+}
+
+u32 RhiDevice::frame_index() const {
+    return static_cast<const RhiDeviceImpl*>(impl_)->frame_index;
 }
 
 // ---------------------------------------------------------------------------
@@ -1258,8 +1364,7 @@ bool RhiDevice::capture_back_buffer(std::vector<std::uint8_t>& out_rgba,
 
     impl->flush();
 
-    impl->cmd_allocators[impl->frame_index]->Reset();
-    impl->cmd_list->Reset(impl->cmd_allocators[impl->frame_index].Get(), nullptr);
+    impl->begin_upload();
 
     D3D12_RESOURCE_BARRIER to_copy{};
     to_copy.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -1267,7 +1372,7 @@ bool RhiDevice::capture_back_buffer(std::vector<std::uint8_t>& out_rgba,
     to_copy.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
     to_copy.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
     to_copy.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    impl->cmd_list->ResourceBarrier(1, &to_copy);
+    impl->upload_list->ResourceBarrier(1, &to_copy);
 
     D3D12_TEXTURE_COPY_LOCATION dst{};
     dst.pResource       = readback.Get();
@@ -1279,7 +1384,7 @@ bool RhiDevice::capture_back_buffer(std::vector<std::uint8_t>& out_rgba,
     src.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     src.SubresourceIndex = 0;
 
-    impl->cmd_list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    impl->upload_list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
 
     D3D12_RESOURCE_BARRIER to_present{};
     to_present.Type                   = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -1287,12 +1392,9 @@ bool RhiDevice::capture_back_buffer(std::vector<std::uint8_t>& out_rgba,
     to_present.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
     to_present.Transition.StateAfter  = D3D12_RESOURCE_STATE_PRESENT;
     to_present.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    impl->cmd_list->ResourceBarrier(1, &to_present);
+    impl->upload_list->ResourceBarrier(1, &to_present);
 
-    impl->cmd_list->Close();
-    ID3D12CommandList* lists[] = {impl->cmd_list.Get()};
-    impl->queue->ExecuteCommandLists(1, lists);
-    impl->flush();
+    impl->end_upload();
 
     u8* mapped = nullptr;
     const D3D12_RANGE read_range{0, static_cast<SIZE_T>(total_size)};

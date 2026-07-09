@@ -148,6 +148,17 @@ Strict downward-only: modules depend only on layers below them, siblings never d
   deliberately deferred until gameplay code churns often enough to justify
   the edit-compile-relink cost that alternative would solve.
 
+### Renderer submission & RHI binding layout (ADR-0010)
+- Immediate-mode draw list: `load_model()` returns a `ModelId`; callers
+  `submit(ModelId, mat4)` per frame between `begin_frame`/`end_frame`.
+  All dynamic constants come from a per-frame upload ring
+  (`set_constant_buffer(slot, buffer, 256-aligned offset)`); per-frame
+  resources are indexed by `RhiDevice::frame_index()`, never by handle
+  arithmetic. Root signatures are derived from `PipelineDesc::bindings`
+  (`BindingLayout` CBV/SRV-table counts, deduped in a cache) — the RHI has
+  no renderer-specific layout knowledge. The renderer (`renderer.cpp`) is
+  backend-agnostic; only `rhi_dx12.cpp` may touch D3D12/Win32.
+
 ## Code Style & Conventions
 
 - **Namespaces:** everything under `ge`. Modules nest: `ge::platform`, `ge::core`, `ge::gfx`, etc.
@@ -233,8 +244,10 @@ character capsule (Phase 5's DoD scenarios).
 Phase 6 goal: skeletal animation with GPU skinning, clip sampling/looping,
 blend trees, animation state machines, root motion (IK later).
 
-See `docs/phases/06-animation.md` for design details (expand before coding —
-currently a stub).
+See `docs/phases/06-animation.md` for design details (expanded 2026-07-09:
+module layout for the new `ge_anim` Layer 3 module, sibling-isolation
+contract with `ge_gfx`, GPU-skinning tech decisions, 5 milestones, test
+plan).
 
 ## Golden Rules (Never Violate)
 
@@ -263,6 +276,8 @@ Full policy and vendoring rule: [`docs/third-party-libraries.md`](docs/third-par
 - `docs/phases/NN-*.md` — per-phase design depth (expanded just-in-time)
 - `docs/decisions/NNNN-*.md` — Architecture Decision Records (ADRs) capturing rationale
 - `docs/decisions/README.md` — index of all ADRs
+- `docs/documentation/NN-*.md` — reference manual / study material describing each
+  implemented system **as it currently is** (indexed in `docs/documentation/README.md`)
 - `docs/testing.md` — test framework, tiers, and testability guidance (read when setting up a module's tests)
 - `docs/third-party-libraries.md` — allowed libraries and vendoring policy (read when adding a dependency)
 - **API reference** — all public headers carry Doxygen `/** */` documentation
@@ -275,3 +290,6 @@ Upkeep rules:
 - Keep each decision in exactly one place (link, never duplicate)
 - Update statuses in phase docs and `plan.md` as work lands
 - When adding or changing a public API, update its Doxygen comment in the header
+- When a change invalidates something in `docs/documentation/`, update the
+  affected document in the same piece of work — phase docs record history and
+  stay untouched, but the reference manual describes the present and must not rot

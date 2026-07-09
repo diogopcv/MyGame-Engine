@@ -15,3 +15,4 @@ one and update the status.
 | 0007 | Reflection / type-system mechanism            | Accepted | 2     |
 | 0008 | ECS storage model                             | Accepted | 4     |
 | 0009 | Scripting / iteration model                   | Accepted | 4     |
+| 0010 | Renderer draw submission & RHI binding layout | Accepted | 5→6   |

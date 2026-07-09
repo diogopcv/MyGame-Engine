@@ -10,6 +10,16 @@
  */
 namespace ge::gfx {
 
+/**
+ * @brief Number of frames the CPU may record ahead of the GPU.
+ *
+ * Shared by the RHI (swapchain buffering, per-frame fences) and any caller
+ * that keeps per-frame CPU-writable resources (e.g. constant-buffer rings):
+ * a resource slot indexed by @c RhiDevice::frame_index() is safe to write
+ * because @c begin_frame() waits for that slot's previous GPU work.
+ */
+constexpr u32 kRhiFrameCount = 2;
+
 // ---------------------------------------------------------------------------
 // Handle types
 // ---------------------------------------------------------------------------
@@ -164,15 +174,26 @@ struct InputElement {
 };
 
 /**
- * @brief Root-signature layout variant.
+ * @brief Describes a pipeline's shader binding interface.
  *
- * Default — 2 CBVs (b0,b1) + 2 SRV tables (t0,t1).
- * PBR     — 3 CBVs (b0,b1,b2) + 6 SRV tables (t0–t5).
+ * The RHI derives the root signature from these counts instead of hardcoding
+ * per-renderer variants.  Binding slots follow a fixed convention:
+ * - slots `[0, cbv_count)` are root CBVs bound to registers `b0..b(N-1)`
+ *   (use @c RhiDevice::set_constant_buffer with the slot index);
+ * - slots `[cbv_count, cbv_count + srv_table_count)` are single-SRV
+ *   descriptor tables bound to registers `t0..t(M-1)` (use
+ *   @c RhiDevice::set_texture with the slot index).
+ *
+ * Identical layouts (including static-sampler state) share one root
+ * signature via an internal cache.
  */
-enum class RootLayout : u8 {
-    Default,
-    PBR,
+struct BindingLayout {
+    u32 cbv_count       = 2; ///< Root CBVs b0..b(N-1). Max kMaxBindingCbvs.
+    u32 srv_table_count = 2; ///< Single-SRV tables t0..t(M-1). Max kMaxBindingSrvTables.
 };
+
+constexpr u32 kMaxBindingCbvs      = 8;
+constexpr u32 kMaxBindingSrvTables = 16;
 
 /** @brief Descriptor for creating a graphics pipeline state. */
 struct PipelineDesc {
@@ -196,7 +217,7 @@ struct PipelineDesc {
     FilterMode         sampler_filter     = FilterMode::Point; ///< Static sampler s0 filter mode.
     AddressMode        sampler_address    = AddressMode::Wrap;  ///< Static sampler s0 address mode (u/v/w).
     BlendMode          blend_mode         = BlendMode::Opaque;  ///< Render-target colour blend mode.
-    RootLayout         root_layout        = RootLayout::Default; ///< Root-signature variant.
+    BindingLayout      bindings;                                ///< Shader binding interface (root signature).
 };
 
 /** @brief Descriptor for initialising the RHI device. */

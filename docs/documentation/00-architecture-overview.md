@@ -64,7 +64,7 @@ animation, AI, the asset system, gameplay/UI) is still on the roadmap.
 |-------------|-------|---------|
 | `engine/platform/` | 0 | OS abstraction: window, timer, memory, file I/O |
 | `engine/core/` | 1 | Foundation: types, math, allocators, containers, reflection, serialization, jobs, handles, profiler, CVars |
-| `engine/gfx/` | 3 | Graphics subsystem: DX12 RHI, render graph, mesh/material, camera, PBR + Blinn-Phong lighting, shadows |
+| `engine/gfx/` | 3 | Graphics subsystem: DX12 RHI, render graph, mesh/material, camera, PBR lighting, shadows, multi-model draw submission (ADR-0010) |
 | `engine/input/` | 3 | `InputMap`: named action/axis bindings on top of `platform::KeyCode` |
 | `engine/physics/` | 3 | Hand-written rigid-body physics: shapes/collision/GJK, broadphase, manifolds, solver, `PhysicsWorld` |
 | `engine/world/` | 4 | Sparse-set ECS (`World`, `ComponentPool<T>`), `Scene` (roster + save/load) |
@@ -237,7 +237,7 @@ In Debug builds, the D3D12 debug layer, GPU-based validation, and DRED (Device R
 | Types and structs | `PascalCase` | `Arena`, `BufferHandle`, `RendererDesc` |
 | Constants | `k` prefix | `k_pi`, `kMaxPointLights`, `kFrameCount` |
 | Private members | Trailing underscore | `base_`, `offset_`, `impl_` |
-| Files | `snake_case` | `arena.h`, `renderer_dx12.cpp` |
+| Files | `snake_case` | `arena.h`, `rhi_dx12.cpp` |
 | Namespaces | `snake_case` | `ge::platform`, `ge::gfx` |
 | Macros | `SCREAMING_SNAKE_CASE` | `GE_ASSERT`, `GE_MEGABYTES`, `GE_PROFILE_SCOPE` |
 

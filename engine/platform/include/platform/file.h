@@ -54,4 +54,18 @@ bool file_exists(const char* path);
  */
 std::size_t file_size(const char* path);
 
+/**
+ * @brief Directory containing the running executable.
+ *
+ * Written as UTF-8 without a trailing separator (convert with
+ * `std::filesystem::path(std::u8string(...))` or equivalent before use if
+ * the path may contain non-ASCII characters).
+ *
+ * @param out      Buffer receiving the null-terminated UTF-8 path.
+ * @param capacity Size of @p out in bytes.
+ * @return Length of the written string (excluding the terminator), or 0 on
+ *         failure (buffer too small or OS query failed).
+ */
+std::size_t executable_dir(char* out, std::size_t capacity);
+
 } // namespace ge::platform
