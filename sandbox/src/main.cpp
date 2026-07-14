@@ -17,6 +17,7 @@
 #include "physics/rigidbody.h"
 #include "anim/animation_loader.h"
 #include "anim/pose.h"
+#include "anim/state_machine.h"
 
 #include <filesystem>
 #include <string>
@@ -152,39 +153,58 @@ int main() {
         }
     }
 
-    // Phase 6 (Milestone 3): a skinned character. The mesh loads through the
-    // renderer (ge_gfx), the skeleton + clips through ge_anim's own parse of
-    // the same .glb; the two meet only through the bone palette handed to
-    // submit_skinned() as a bare mat4* (sibling-isolation contract,
-    // docs/phases/06-animation.md).
-    gfx::ModelId   fox_model = gfx::kInvalidModelId;
+    // Phase 6 (Milestones 3+4): the Fox is the player's visible character.
+    // The mesh loads through the renderer (ge_gfx), the skeleton + clips
+    // through ge_anim's own parse of the same .glb; the two meet only
+    // through the bone palette handed to submit_skinned() as a bare mat4*
+    // (sibling-isolation contract, docs/phases/06-animation.md). Locomotion
+    // is a two-state machine: Idle (Survey) <-> Moving (Walk/Run 1D-blended
+    // over the capsule's actual horizontal speed), with 0.25 s crossfades.
+    gfx::ModelId       fox_model = gfx::kInvalidModelId;
     anim::AnimationSet fox_anim{};
-    anim::Pose     fox_pose{};
-    mat4*          fox_model_space = nullptr;
-    mat4*          fox_palette     = nullptr;
-    i32            fox_clip        = -1;
-    f32            fox_anim_time   = 0.0f;
+    anim::Pose         fox_pose{};
+    anim::AnimStateMachine fox_sm{};
+    mat4*              fox_model_space = nullptr;
+    mat4*              fox_palette     = nullptr;
+    u32                fox_state_idle   = anim::AnimStateMachine::kInvalidState;
+    u32                fox_state_moving = anim::AnimStateMachine::kInvalidState;
     {
         const std::string path = model_path("Fox.glb");
         fox_model = renderer.load_model(path.c_str(), perm.allocator());
-        if (fox_model != gfx::kInvalidModelId &&
-            anim::load_animation_gltf(path.c_str(), perm.allocator(), fox_anim)) {
+        const i32 survey = fox_model != gfx::kInvalidModelId &&
+                           anim::load_animation_gltf(path.c_str(), perm.allocator(), fox_anim)
+                           ? fox_anim.find_clip("Survey") : -1;
+        const i32 walk = fox_anim.find_clip("Walk");
+        const i32 run  = fox_anim.find_clip("Run");
+        if (survey >= 0 && walk >= 0 && run >= 0) {
             fox_pose.init(fox_anim.skeleton.joint_count, perm.allocator());
             fox_model_space = perm.allocator().alloc_n<mat4>(fox_anim.skeleton.joint_count);
             fox_palette     = perm.allocator().alloc_n<mat4>(fox_anim.skeleton.joint_count);
-            fox_clip        = fox_anim.find_clip("Walk");
-            if (fox_clip < 0 && fox_anim.clip_count > 0) fox_clip = 0;
+            fox_sm.init(&fox_anim.skeleton, perm.allocator());
+
+            anim::AnimState idle{};
+            idle.clips[0] = &fox_anim.clips[survey];
+            idle.clip_count = 1;
+            fox_state_idle = fox_sm.add_state(idle); // first state = initial
+
+            // Anchors in world speed units: Walk owns the pose at the base
+            // move_speed (3), Run at the sprinted speed (3 x 3 = 9).
+            anim::AnimState moving{};
+            moving.clips[0] = &fox_anim.clips[walk]; moving.anchors[0] = 3.0f;
+            moving.clips[1] = &fox_anim.clips[run];  moving.anchors[1] = 9.0f;
+            moving.clip_count = 2;
+            fox_state_moving = fox_sm.add_state(moving);
+
             // Prime the palette so the first frames (before any fixed tick)
             // don't submit uninitialized matrices.
-            if (fox_clip >= 0) {
-                anim::sample(fox_anim.clips[fox_clip], fox_anim.skeleton, 0.0f, true, fox_pose);
-                anim::pose_to_model_space(fox_anim.skeleton, fox_pose, fox_model_space);
-                anim::pose_to_palette(fox_anim.skeleton, fox_model_space, fox_palette);
-            }
+            fox_sm.tick(0.0f, 0.0f, fox_pose);
+            anim::pose_to_model_space(fox_anim.skeleton, fox_pose, fox_model_space);
+            anim::pose_to_palette(fox_anim.skeleton, fox_model_space, fox_palette);
+
             GE_INFO("Loaded skinned character: {} ({} joints, {} clips)", path,
                     fox_anim.skeleton.joint_count, fox_anim.clip_count);
         } else {
-            GE_WARN("Could not load Fox.glb — no skinned character this run");
+            GE_WARN("Could not load Fox.glb with Survey/Walk/Run — no skinned character this run");
             fox_model = gfx::kInvalidModelId;
         }
     }
@@ -302,12 +322,23 @@ int main() {
             system_sync_transform_from_rigidbody(scene.world(), phys);
 
             // Animation ticks on the fixed step (same accumulator as physics,
-            // per the phase doc) — sample the looping clip and rebuild the
-            // bone palette; the render submit below uses the latest one.
-            if (fox_model != gfx::kInvalidModelId && fox_clip >= 0) {
-                fox_anim_time += static_cast<f32>(fixed_dt);
-                anim::sample(fox_anim.clips[fox_clip], fox_anim.skeleton,
-                             fox_anim_time, true, fox_pose);
+            // per the phase doc). Gameplay state -> state machine: the blend
+            // parameter and the idle/moving transition both come from the
+            // capsule's actual horizontal speed (physics is the source of
+            // truth, not raw input), so wall collisions read as idling.
+            if (fox_model != gfx::kInvalidModelId) {
+                const physics::RigidBody& body = phys.body(player_body_id);
+                const f32 speed = length(vec3{body.linear_velocity.x, 0.0f,
+                                              body.linear_velocity.z});
+
+                constexpr f32 kMoveThreshold = 0.5f;
+                constexpr f32 kFadeTime      = 0.25f;
+                if (speed > kMoveThreshold && fox_sm.current_state() != fox_state_moving)
+                    fox_sm.transition_to(fox_state_moving, kFadeTime);
+                else if (speed <= kMoveThreshold && fox_sm.current_state() != fox_state_idle)
+                    fox_sm.transition_to(fox_state_idle, kFadeTime);
+
+                fox_sm.tick(static_cast<f32>(fixed_dt), speed, fox_pose);
                 anim::pose_to_model_space(fox_anim.skeleton, fox_pose, fox_model_space);
                 anim::pose_to_palette(fox_anim.skeleton, fox_model_space, fox_palette);
             }
@@ -333,14 +364,20 @@ int main() {
             GE_PROFILE_SCOPE("render");
             renderer.begin_frame(static_cast<float>(frame_time));
             if (helmet != gfx::kInvalidModelId) {
-                world::Transform* pt = scene.world().get_component<world::Transform>(player);
-                renderer.submit(helmet, trs(pt->position, pt->rotation, pt->scale));
+                // Static prop now that the Fox is the player's visual —
+                // still useful as a PBR reference object in the scene.
+                renderer.submit(helmet, mat4_translation({0.0f, 1.2f, 5.0f}));
             }
-            if (fox_model != gfx::kInvalidModelId && fox_clip >= 0) {
-                // The Fox asset is authored in centimetres (~75 units tall);
-                // scale it into the scene and stand it on the ground plane.
-                const mat4 fox_world = mat4_scale({0.025f, 0.025f, 0.025f}) *
-                                       mat4_translation({2.5f, 0.0f, 2.5f});
+            if (fox_model != gfx::kInvalidModelId) {
+                // The Fox rides the player capsule: authored in centimetres
+                // (~79 units tall, feet at y=0, facing +Z like the player at
+                // yaw 0), so scale it down and drop it to the capsule's
+                // bottom (center y - halfheight - radius = y - 0.9).
+                world::Transform* pt = scene.world().get_component<world::Transform>(player);
+                const vec3 feet = pt->position - vec3{0.0f, 0.9f, 0.0f};
+                const mat4 fox_world = mat4_scale({0.015f, 0.015f, 0.015f}) *
+                                       quat_to_matrix(pt->rotation) *
+                                       mat4_translation(feet);
                 renderer.submit_skinned(fox_model, fox_world, fox_palette,
                                         fox_anim.skeleton.joint_count);
             }
@@ -361,6 +398,7 @@ int main() {
     }
 
     GE_INFO("Shutting down ...");
+    fox_sm.shutdown();
     fox_pose.shutdown();
     fox_anim.shutdown();
     scene.shutdown();

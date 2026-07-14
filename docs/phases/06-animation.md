@@ -1,8 +1,9 @@
 # Phase 6 — Animation
 
 > Status: **In progress.** Expanded 2026-07-09. Milestones 1 (animation core +
-> sampling math), 2 (glTF import + test assets), and 3 (GPU skinning render
-> path) complete 2026-07-14; Milestone 4 (blending + state machine) next.
+> sampling math), 2 (glTF import + test assets), 3 (GPU skinning render
+> path), and 4 (blending + state machine) complete 2026-07-14; Milestone 5
+> (root motion) next.
 > Note: the skinned *shadow* palette is bound at **b2** with
 > `BindingLayout{3,2}` (the depth-only root signature has no PerMaterial
 > slot), not b3 as sketched below — same ring allocation, different slot.

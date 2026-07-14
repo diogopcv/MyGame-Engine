@@ -741,5 +741,36 @@ lost, but they do not block any phase above.
   Fox loads (24 joints, 3 clips, skinned=1), Walk plays looping, ~120 FPS,
   capsule still rests at 0.89, clean exit, no errors. 0 warnings at
   `/W4 /permissive-`.
-- Current: Phase 6 — Animation, Milestone 4 (blending + state machine)
-  next. See `docs/phases/06-animation.md`.
+- 2026-07-14 Phase 6 Milestone 4 done: blending + state machine. New
+  `anim/state_machine.h/.cpp`: `AnimState` (a single looping clip or a 1D
+  blend of up to 4 clips over strictly-ascending parameter anchors — clip
+  pointers borrowed from the owning `AnimationSet`) and `AnimStateMachine`
+  (fixed capacity 8, hand-rolled per the phase doc's ADR-0009-style "plain
+  C++ until churn demands more" decision — not a data-driven graph):
+  `add_state()` (first added = initial), `transition_to(id, fade_time)`
+  (crossfade; incoming state's clock restarts; <=0 fade switches instantly;
+  transitioning mid-fade drops the old outgoing pose — documented small pop,
+  revisit only if the manual pass flags it), `tick(dt, param, out_pose)`
+  (advances the current and fading-out state clocks, evaluates the 1D blend
+  via Milestone 1's `blend_1d_weights` — at most two adjacent non-zero
+  weights, so evaluation is sample-two-clips-and-blend — then ramps the
+  incoming pose 0→1 over the fade; weights sum to 1 at every stage by
+  construction). Sandbox — the Fox is now the *player's* visible character
+  riding the physics capsule (scaled cm→scene, feet at capsule bottom,
+  facing from player yaw; the DamagedHelmet demoted to a static PBR prop):
+  a two-state machine [Idle = Survey] <-> [Moving = Walk@3 / Run@9 blended
+  over the capsule's actual horizontal speed — physics as the source of
+  truth, so wall collisions read as idling] with 0.25 s crossfades on a
+  0.5-speed threshold, ticked on the fixed timestep; sprint (Shift, 3x)
+  naturally pushes the blend toward Run. 6 new unit tests: single-state ==
+  direct clip sample (clock accumulation), 1D blend exact at/between/outside
+  anchors, crossfade weight ramp hit at exact quarter/half/complete points,
+  same-state transition no-op (clock keeps running), incoming clock restart
+  (caught-by-design via a non-looping ramp clip), and crossfade-into-blend
+  compounding both weight systems. 21 anim test cases (464 assertions);
+  full CTest suite (7 executables) green, 0 warnings at `/W4 /permissive-`;
+  sandbox verified live (Fox idles in Survey at rest, ~120 FPS, clean
+  exit). Manual blend-feel review (idle<->walk<->run under real input)
+  rolls into Milestone 5's phase-DoD sign-off.
+- Current: Phase 6 — Animation, Milestone 5 (root motion) next. See
+  `docs/phases/06-animation.md`.
