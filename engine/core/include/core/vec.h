@@ -59,6 +59,13 @@ inline f32   length(vec3 a)              { return std::sqrt(length_sq(a)); }
 /** @brief Return a unit-length vec3 in the same direction. */
 inline vec3  normalize(vec3 a)           { return a / length(a); }
 /**
+ * @brief Linear interpolation between two vec3.
+ * @param a Value at t = 0.
+ * @param b Value at t = 1.
+ * @param t Interpolation parameter (not clamped).
+ */
+inline vec3  lerp(vec3 a, vec3 b, f32 t) { return a + (b - a) * t; }
+/**
  * @brief Cross product of two vec3 (left-handed).
  * @param a First vector.
  * @param b Second vector.

@@ -43,5 +43,6 @@ add_subdirectory(engine/core)       # Layer 1 : foundation (depends on platform)
 add_subdirectory(engine/gfx)        # Layer 3 : graphics subsystem (DX12 RHI)
 add_subdirectory(engine/input)      # Layer 3 : input-mapping subsystem
 add_subdirectory(engine/physics)    # Layer 3 : physics subsystem (depends on core only)
+add_subdirectory(engine/anim)       # Layer 3 : animation subsystem (depends on core only)
 add_subdirectory(engine/world)      # Layer 4 : ECS / world (depends on core only)
 add_subdirectory(sandbox)           # Layer 5 : the application (depends on core, gfx, input, world)

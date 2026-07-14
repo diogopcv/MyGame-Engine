@@ -1,6 +1,7 @@
 # Phase 6 — Animation
 
-> Status: **In progress.** Expanded 2026-07-09; no milestone started yet.
+> Status: **In progress.** Expanded 2026-07-09. Milestone 1 (animation core +
+> sampling math) complete 2026-07-14; Milestone 2 next.
 
 ## Goal
 Skeletal animation with GPU skinning: clip sampling and looping, pose

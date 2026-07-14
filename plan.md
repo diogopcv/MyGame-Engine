@@ -645,5 +645,35 @@ lost, but they do not block any phase above.
   `BindingLayout{4,6}`, palette from the upload ring, skinned shadow pass),
   5 milestones, test plan, and the rigged-asset plan (gen_skinned_glb tool +
   Khronos Fox).
-- Current: Phase 6 — Animation, Milestone 1 not yet started. See
-  `docs/phases/06-animation.md`.
+- 2026-07-14 Phase 6 Milestone 1 done: animation core + sampling math (no
+  rendering). New `ge_anim` module (Layer 3, depends only on `ge_core` —
+  never sideways on `ge_gfx`/`ge_world`, per the phase doc's sibling-isolation
+  contract). `skeleton.h`: `Skeleton` (parent-index array with the
+  parents-precede-children invariant asserted, per-joint inverse bind
+  matrices, local-space rest pose) + `JointPose` (TRS — cheaper to blend than
+  matrices, slerp stays on the rotation manifold) + `kMaxJoints = 256` (u8
+  GPU joint indices). `clip.h/.cpp`: `AnimationClip` — raw per-joint SoA
+  keyframe tracks (times + values per channel; empty track = channel falls
+  back to the skeleton rest pose), clip-owned track storage via
+  `alloc_*_keys()` helpers; `sample()` with binary-search keyframe lookup,
+  vec3 lerp / quat slerp interpolation, looping wrap via fmod (negative
+  times wrap forward) vs. non-looping clamp, and first/last-key clamping
+  inside a track. `pose.h/.cpp`: `Pose` (local TRS array); `blend(a,b,t)`
+  (weights sum to 1 by construction); `blend_1d_weights()` (the 1D locomotion
+  blend's pure weight math, ahead of Milestone 4's state machine per the test
+  plan: zero except the two bracketing anchors, clamped outside the range);
+  `pose_to_model_space()` (single forward pass, `model[j] = local[j] *
+  model[parent]` in the engine's row-vector convention) and
+  `pose_to_palette()` (`palette[j] = inverse_bind[j] * model[j]`, so the
+  rest pose yields identity palettes). Added `lerp(vec3, vec3, f32)` to
+  `core/vec.h` (the one math primitive blending needed that core lacked).
+  11 unit tests / 300 assertions: exact keyframe hits, mid-key lerp/slerp
+  (slerp half of 90° = exact 45° axis-angle), loop wraparound incl. negative
+  time, non-looping clamp, rest-pose fallback for untracked channels/joints,
+  single-key constant tracks; 1D blend weights at/between/outside anchors +
+  sum-to-1 sweep; hand-computed 2-bone chain (translate + rotate) through
+  local→model→palette incl. the rest-pose⇒identity-palette round trip and
+  skinning bind-pose vertices to hand-derived animated positions. Full CTest
+  suite (7 executables) green, 0 warnings at `/W4 /permissive-`.
+- Current: Phase 6 — Animation, Milestone 2 (glTF import + test assets)
+  next. See `docs/phases/06-animation.md`.

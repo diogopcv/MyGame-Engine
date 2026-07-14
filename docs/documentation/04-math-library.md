@@ -75,6 +75,7 @@ vec3 d = a * 2.0f;        // Scalar multiplication: {2, 4, 6}
 f32  dp = dot(a, b);      // Dot product: 1*4 + 2*5 + 3*6 = 32
 vec3 cp = cross(a, b);    // Cross product
 vec3 n  = normalize(a);   // Unit-length direction
+vec3 m  = lerp(a, b, 0.5f); // Linear interpolation: {2.5, 3.5, 4.5}
 ```
 
 ### Common Vector Operations
