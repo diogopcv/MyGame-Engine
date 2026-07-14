@@ -47,6 +47,7 @@ enum class Format : u8 {
     Unknown = 0,
     R8G8B8A8_UNORM,
     R8G8B8A8_UNORM_SRGB, ///< sRGB-encoded colour (hardware linearises on sample).
+    R8G8B8A8_UINT,       ///< 4x u8 integers (skinned-vertex joint indices).
     R32G32_FLOAT,
     R32G32B32_FLOAT,
     R32G32B32A32_FLOAT,

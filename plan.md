@@ -709,5 +709,37 @@ lost, but they do not block any phase above.
   still LitVertex, Fox skinned with normalized weights. 15 anim cases (440
   assertions) + 2 new gfx cases; full CTest suite (7 executables) green
   incl. the unchanged golden cube, 0 warnings at `/W4 /permissive-`.
-- Current: Phase 6 — Animation, Milestone 3 (GPU skinning render path)
+- 2026-07-14 Phase 6 Milestone 3 done: GPU skinning render path. RHI —
+  `Format::R8G8B8A8_UINT` (joint-index input element; the one RHI addition
+  the phase doc predicted). Shaders — `pbr_skinned_vs.hlsl` (bone palette as
+  a 256-entry root-CBV cbuffer at b3; linear blend skinning of position +
+  normal + tangent, then the identical world/view/proj path; pixel shader
+  shared with the static PBR pipeline) and `shadow_skinned_vs.hlsl` (palette
+  at b2 — the depth-only root signature has no PerMaterial slot, so
+  `BindingLayout{3,2}` instead of the sketched b3; same ring allocation, a
+  deliberate small deviation noted in the phase doc header). Renderer —
+  skinned PBR PSO block `[address][cull][blend]` mirroring the static 2×2,
+  built lazily by the first skinned model per address mode
+  (`BindingLayout{4,6}`, so SRV table slots shift to 4..9 on skinned draws);
+  skinned shadow pipeline built with the static one; new
+  `Renderer::submit_skinned(id, transform, palette, joint_count)` copies the
+  palette into the per-frame upload ring at submit time (caller may reuse
+  its array immediately; one allocation feeds both the shadow and PBR
+  passes); shadow pass now switches pipelines per item and rebinds b0 on
+  root-signature changes; a skinned mesh submitted through plain `submit()`
+  deliberately falls back to the static PSO and draws its bind pose (the
+  SkinnedVertex LitVertex-prefix makes this valid). Sandbox — links
+  `ge_anim`; loads Fox.glb twice (mesh via renderer, skeleton+clips via
+  ge_anim — the sibling-isolation contract in action), primes the palette at
+  load, advances the looping Walk clip on the fixed timestep (same
+  accumulator as physics per the phase doc), rebuilds pose→model→palette per
+  tick, and submits with a cm→scene scale transform. Tests — new gfx smoke
+  case: strip via `submit_skinned` with a hand-animated 2-joint palette
+  (swing about Z), Fox with an identity palette, plus the static-submit
+  bind-pose fallback, 60 frames, 0 debug-layer errors. Full CTest suite (7
+  executables) green incl. the unchanged golden cube; sandbox verified live:
+  Fox loads (24 joints, 3 clips, skinned=1), Walk plays looping, ~120 FPS,
+  capsule still rests at 0.89, clean exit, no errors. 0 warnings at
+  `/W4 /permissive-`.
+- Current: Phase 6 — Animation, Milestone 4 (blending + state machine)
   next. See `docs/phases/06-animation.md`.

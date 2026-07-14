@@ -2,7 +2,9 @@
 
 #include "gfx/rhi.h"
 #include "gfx/model_loader.h"
+#include "gfx/renderer.h"
 #include "core/arena.h"
+#include "core/transform.h"
 #include "platform/window.h"
 #include "platform/file.h"
 
@@ -166,6 +168,94 @@ TEST_CASE("model loader: Khronos Fox imports as a skinned mesh") {
     }
 
     rhi.shutdown();
+    window.destroy();
+    arena.shutdown();
+}
+
+// Phase 6, Milestone 3 smoke test: the GPU skinning render path. The strip
+// renders through submit_skinned() with a hand-animated palette (joint 1
+// swinging about Z), the Fox renders with an identity palette, and a skinned
+// mesh submitted through plain submit() exercises the bind-pose fallback —
+// N frames, zero debug-layer errors, shadow pass included.
+TEST_CASE("renderer: skinned draws via submit_skinned, no debug errors") {
+    const std::string strip_path = find_model("skinned_strip.glb");
+    REQUIRE_MESSAGE(!strip_path.empty(),
+                    "skinned_strip.glb missing — run tools/gen_skinned_glb.exe");
+    const std::string fox_path = find_model("Fox.glb");
+
+    ge::Arena arena;
+    arena.init(GE_MEGABYTES(16));
+
+    ge::platform::Window window;
+    ge::platform::WindowDesc window_desc{};
+    window_desc.title  = "MyEngine - skinned render smoke test";
+    window_desc.width  = 640;
+    window_desc.height = 480;
+    REQUIRE(window.create(window_desc));
+
+    ge::gfx::Renderer renderer;
+    ge::gfx::RendererDesc renderer_desc{};
+    renderer_desc.hwnd               = window.native_handle();
+    renderer_desc.width              = window.width();
+    renderer_desc.height             = window.height();
+    renderer_desc.enable_debug_layer = true;
+    renderer_desc.vsync              = false;
+    REQUIRE(renderer.init(renderer_desc));
+
+    const ge::gfx::ModelId strip = renderer.load_model(strip_path.c_str(), arena.allocator());
+    REQUIRE(strip != ge::gfx::kInvalidModelId);
+
+    ge::gfx::ModelId fox = ge::gfx::kInvalidModelId;
+    if (!fox_path.empty()) {
+        fox = renderer.load_model(fox_path.c_str(), arena.allocator());
+        REQUIRE(fox != ge::gfx::kInvalidModelId);
+    }
+
+    ge::gfx::Camera camera;
+    camera.position = {0.0f, 1.0f, -6.0f};
+    renderer.set_camera(camera);
+
+    // The Fox has far more joints than the strip's 2 — an all-identity
+    // palette big enough for any small skin keeps it in bind pose.
+    ge::mat4 fox_palette[64];
+    for (ge::mat4& m : fox_palette) m = ge::mat4_identity();
+
+    constexpr float kFixedDt = 1.0f / 60.0f;
+    constexpr int   kFrames  = 60;
+    float           time     = 0.0f;
+
+    for (int i = 0; i < kFrames; ++i) {
+        window.pump_events();
+        time += kFixedDt;
+        renderer.begin_frame(kFixedDt);
+
+        // Hand-animated 2-joint palette: palette[j] = inverse_bind * model.
+        // Joint 0 stays at rest; joint 1 (bind position (0,1,0)) swings
+        // about Z: IB = T(0,-1,0), model = Rz(a) * T(0,1,0).
+        const float a = std::sin(time * 3.0f);
+        ge::mat4 strip_palette[2];
+        strip_palette[0] = ge::mat4_identity();
+        strip_palette[1] = ge::mat4_translation({0, -1, 0}) *
+                           (ge::mat4_rotation_z(a) * ge::mat4_translation({0, 1, 0}));
+        renderer.submit_skinned(strip, ge::mat4_identity(), strip_palette, 2);
+
+        if (fox != ge::gfx::kInvalidModelId) {
+            // Skinned path with an identity palette (bind pose)…
+            const ge::mat4 fox_xf = ge::mat4_scale({0.02f, 0.02f, 0.02f}) *
+                                    ge::mat4_translation({2.5f, 0, 0});
+            renderer.submit_skinned(fox, fox_xf, fox_palette, 64);
+            // …and the static-submit fallback (also bind pose, static PSO).
+            const ge::mat4 fox_xf2 = ge::mat4_scale({0.02f, 0.02f, 0.02f}) *
+                                     ge::mat4_translation({-2.5f, 0, 0});
+            renderer.submit(fox, fox_xf2);
+        }
+
+        renderer.end_frame();
+    }
+
+    CHECK(renderer.debug_error_count() == 0);
+
+    renderer.shutdown();
     window.destroy();
     arena.shutdown();
 }

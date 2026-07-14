@@ -15,12 +15,25 @@
 #include "world/components.h"
 #include "physics/physics_world.h"
 #include "physics/rigidbody.h"
+#include "anim/animation_loader.h"
+#include "anim/pose.h"
 
 #include <filesystem>
+#include <string>
 
 namespace {
 
 using namespace ge;
+
+/// Resolve an asset path under assets/models/, relative to the executable.
+std::string model_path(const char* name) {
+    char exe_dir[512];
+    if (platform::executable_dir(exe_dir, sizeof(exe_dir)) == 0) return {};
+    // exe_dir is UTF-8; go through char8_t so accented paths survive.
+    std::filesystem::path path(std::u8string(reinterpret_cast<const char8_t*>(exe_dir)));
+    path = path / ".." / ".." / ".." / "assets" / "models" / name;
+    return path.string();
+}
 
 /**
  * Fixed-update gameplay system (per ADR-0009: a plain function, not a
@@ -127,23 +140,52 @@ int main() {
     }
     renderer.set_clear_color(0.05f, 0.1f, 0.2f, 1.0f);
 
-    // Load model
+    // Load models
     gfx::ModelId helmet = gfx::kInvalidModelId;
     {
-        char exe_dir[512];
-        if (platform::executable_dir(exe_dir, sizeof(exe_dir)) > 0) {
-            // exe_dir is UTF-8; go through char8_t so accented paths survive.
-            std::filesystem::path model_path(
-                std::u8string(reinterpret_cast<const char8_t*>(exe_dir)));
-            model_path = model_path / ".." / ".." / ".." / "assets" / "models"
-                         / "DamagedHelmet.glb";
-            std::string model_str = model_path.string();
-            helmet = renderer.load_model(model_str.c_str(), perm.allocator());
-            if (helmet != gfx::kInvalidModelId) {
-                GE_INFO("Loaded model: {}", model_str);
-            } else {
-                GE_WARN("Could not load model — using built-in cube");
+        const std::string path = model_path("DamagedHelmet.glb");
+        helmet = renderer.load_model(path.c_str(), perm.allocator());
+        if (helmet != gfx::kInvalidModelId) {
+            GE_INFO("Loaded model: {}", path);
+        } else {
+            GE_WARN("Could not load model — using built-in cube");
+        }
+    }
+
+    // Phase 6 (Milestone 3): a skinned character. The mesh loads through the
+    // renderer (ge_gfx), the skeleton + clips through ge_anim's own parse of
+    // the same .glb; the two meet only through the bone palette handed to
+    // submit_skinned() as a bare mat4* (sibling-isolation contract,
+    // docs/phases/06-animation.md).
+    gfx::ModelId   fox_model = gfx::kInvalidModelId;
+    anim::AnimationSet fox_anim{};
+    anim::Pose     fox_pose{};
+    mat4*          fox_model_space = nullptr;
+    mat4*          fox_palette     = nullptr;
+    i32            fox_clip        = -1;
+    f32            fox_anim_time   = 0.0f;
+    {
+        const std::string path = model_path("Fox.glb");
+        fox_model = renderer.load_model(path.c_str(), perm.allocator());
+        if (fox_model != gfx::kInvalidModelId &&
+            anim::load_animation_gltf(path.c_str(), perm.allocator(), fox_anim)) {
+            fox_pose.init(fox_anim.skeleton.joint_count, perm.allocator());
+            fox_model_space = perm.allocator().alloc_n<mat4>(fox_anim.skeleton.joint_count);
+            fox_palette     = perm.allocator().alloc_n<mat4>(fox_anim.skeleton.joint_count);
+            fox_clip        = fox_anim.find_clip("Walk");
+            if (fox_clip < 0 && fox_anim.clip_count > 0) fox_clip = 0;
+            // Prime the palette so the first frames (before any fixed tick)
+            // don't submit uninitialized matrices.
+            if (fox_clip >= 0) {
+                anim::sample(fox_anim.clips[fox_clip], fox_anim.skeleton, 0.0f, true, fox_pose);
+                anim::pose_to_model_space(fox_anim.skeleton, fox_pose, fox_model_space);
+                anim::pose_to_palette(fox_anim.skeleton, fox_model_space, fox_palette);
             }
+            GE_INFO("Loaded skinned character: {} ({} joints, {} clips)", path,
+                    fox_anim.skeleton.joint_count, fox_anim.clip_count);
+        } else {
+            GE_WARN("Could not load Fox.glb — no skinned character this run");
+            fox_model = gfx::kInvalidModelId;
         }
     }
 
@@ -259,6 +301,17 @@ int main() {
             phys.step(static_cast<f32>(fixed_dt));
             system_sync_transform_from_rigidbody(scene.world(), phys);
 
+            // Animation ticks on the fixed step (same accumulator as physics,
+            // per the phase doc) — sample the looping clip and rebuild the
+            // bone palette; the render submit below uses the latest one.
+            if (fox_model != gfx::kInvalidModelId && fox_clip >= 0) {
+                fox_anim_time += static_cast<f32>(fixed_dt);
+                anim::sample(fox_anim.clips[fox_clip], fox_anim.skeleton,
+                             fox_anim_time, true, fox_pose);
+                anim::pose_to_model_space(fox_anim.skeleton, fox_pose, fox_model_space);
+                anim::pose_to_palette(fox_anim.skeleton, fox_model_space, fox_palette);
+            }
+
             accumulator -= fixed_dt;
         }
 
@@ -283,6 +336,14 @@ int main() {
                 world::Transform* pt = scene.world().get_component<world::Transform>(player);
                 renderer.submit(helmet, trs(pt->position, pt->rotation, pt->scale));
             }
+            if (fox_model != gfx::kInvalidModelId && fox_clip >= 0) {
+                // The Fox asset is authored in centimetres (~75 units tall);
+                // scale it into the scene and stand it on the ground plane.
+                const mat4 fox_world = mat4_scale({0.025f, 0.025f, 0.025f}) *
+                                       mat4_translation({2.5f, 0.0f, 2.5f});
+                renderer.submit_skinned(fox_model, fox_world, fox_palette,
+                                        fox_anim.skeleton.joint_count);
+            }
             renderer.end_frame();
         }
 
@@ -300,6 +361,8 @@ int main() {
     }
 
     GE_INFO("Shutting down ...");
+    fox_pose.shutdown();
+    fox_anim.shutdown();
     scene.shutdown();
     phys.shutdown();
     renderer.shutdown();

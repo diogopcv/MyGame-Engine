@@ -180,11 +180,15 @@ struct LoadedModel {
     bool         in_use = false;
 };
 
+/// Marks a DrawItem with no bone palette (static draw, or skinned bind-pose fallback).
+constexpr u32 kNoPalette = ~0u;
+
 /// One instance submitted for the current frame.
 struct DrawItem {
     ModelId model_id;
     mat4    transform;
-    u32     object_cb_offset; ///< Ring offset of this item's GpuPerObjectCB.
+    u32     object_cb_offset;  ///< Ring offset of this item's GpuPerObjectCB.
+    u32     palette_cb_offset; ///< Ring offset of the bone palette, or kNoPalette.
 };
 
 /// (item, submesh) pair used for opaque/transparent partitioning and sorting.
@@ -207,7 +211,9 @@ struct RendererImpl {
 
     // Shadow resources
     ShaderHandle   shadow_vs_shader;
+    ShaderHandle   shadow_skinned_vs_shader;
     PipelineHandle shadow_pipeline;
+    PipelineHandle shadow_skinned_pipeline;
     TextureHandle  shadow_map;
     mat4           cached_light_vp{};
     bool           has_shadows = false;
@@ -215,10 +221,14 @@ struct RendererImpl {
     // PBR resources.
     // PSO variants: [address mode] x [cull: 0=Back, 1=None] x [blend: 0=Opaque,
     // 1=AlphaBlend]. Each address-mode block is built lazily on the first model
-    // that needs it, so models with different sampler wrap modes coexist.
+    // that needs it, so models with different sampler wrap modes coexist. The
+    // skinned block mirrors the static one and is built lazily by the first
+    // *skinned* model with that address mode.
     ShaderHandle   pbr_vs;
     ShaderHandle   pbr_ps;
+    ShaderHandle   pbr_skinned_vs;
     PipelineHandle pbr_psos[kAddressModeCount][2][2];
+    PipelineHandle pbr_skinned_psos[kAddressModeCount][2][2];
     TextureHandle  default_white_tex;  ///< 1×1 white fallback for missing PBR maps.
     TextureHandle  default_normal_tex; ///< 1×1 flat normal {128,128,255}.
     bool           pbr_shaders_ready = false;
@@ -244,6 +254,10 @@ struct RendererImpl {
 
     PipelineHandle pbr_pso(AddressMode address, bool double_sided, bool blend) const {
         return pbr_psos[static_cast<u32>(address)][double_sided ? 1 : 0][blend ? 1 : 0];
+    }
+
+    PipelineHandle pbr_skinned_pso(AddressMode address, bool double_sided, bool blend) const {
+        return pbr_skinned_psos[static_cast<u32>(address)][double_sided ? 1 : 0][blend ? 1 : 0];
     }
 
     bool create_cube_resources() {
@@ -349,6 +363,29 @@ struct RendererImpl {
         shadow_pipeline = rhi.create_pipeline(pipe_desc);
         if (!shadow_pipeline.is_valid()) return false;
 
+        // Skinned variant — without it, characters cast rest-pose shadows.
+        // Same depth state; palette is one extra root CBV (b2, so {3, 2}).
+        std::vector<u8> skinned_vs_bytecode = load_shader_bytecode("shadow_skinned_vs.cso");
+        if (skinned_vs_bytecode.empty()) return false;
+        shadow_skinned_vs_shader = rhi.create_shader(
+            {skinned_vs_bytecode.data(), static_cast<u32>(skinned_vs_bytecode.size())});
+        if (!shadow_skinned_vs_shader.is_valid()) return false;
+
+        InputElement skinned_elements[] = {
+            {"POSITION", 0, Format::R32G32B32_FLOAT,    0},
+            {"NORMAL",   0, Format::R32G32B32_FLOAT,    12},
+            {"TEXCOORD", 0, Format::R32G32_FLOAT,       24},
+            {"JOINTS",   0, Format::R8G8B8A8_UINT,      72},
+            {"WEIGHTS",  0, Format::R32G32B32A32_FLOAT, 76},
+        };
+        pipe_desc.vertex_shader       = shadow_skinned_vs_shader;
+        pipe_desc.input_elements      = skinned_elements;
+        pipe_desc.input_element_count = 5;
+        pipe_desc.input_stride        = sizeof(SkinnedVertex);
+        pipe_desc.bindings            = {3, 2};
+        shadow_skinned_pipeline = rhi.create_pipeline(pipe_desc);
+        if (!shadow_skinned_pipeline.is_valid()) return false;
+
         TextureDesc tex_desc{};
         tex_desc.width  = kShadowMapSize;
         tex_desc.height = kShadowMapSize;
@@ -404,14 +441,63 @@ struct RendererImpl {
         return true;
     }
 
+    /// Skinned counterpart of ensure_pbr_psos(): same 2x2 block per address
+    /// mode, with the SkinnedVertex layout, the skinned VS, and one extra
+    /// root CBV for the bone palette (b3, so {4, 6}). Shares pbr_ps.
+    bool ensure_pbr_skinned_psos(AddressMode address) {
+        auto& block = pbr_skinned_psos[static_cast<u32>(address)];
+        if (block[0][0].is_valid()) return true;
+
+        InputElement input_elements[] = {
+            {"POSITION", 0, Format::R32G32B32_FLOAT,    0},
+            {"NORMAL",   0, Format::R32G32B32_FLOAT,   12},
+            {"TEXCOORD", 0, Format::R32G32_FLOAT,       24},
+            {"TEXCOORD", 1, Format::R32G32_FLOAT,       32},
+            {"COLOR",    0, Format::R32G32B32A32_FLOAT, 40},
+            {"TANGENT",  0, Format::R32G32B32A32_FLOAT, 56},
+            {"JOINTS",   0, Format::R8G8B8A8_UINT,      72},
+            {"WEIGHTS",  0, Format::R32G32B32A32_FLOAT, 76},
+        };
+
+        const CullMode  culls[2]  = {CullMode::Back, CullMode::None};
+        const BlendMode blends[2] = {BlendMode::Opaque, BlendMode::AlphaBlend};
+
+        for (u32 c = 0; c < 2; ++c) {
+            for (u32 b = 0; b < 2; ++b) {
+                PipelineDesc pipe_desc{};
+                pipe_desc.vertex_shader       = pbr_skinned_vs;
+                pipe_desc.pixel_shader        = pbr_ps;
+                pipe_desc.input_elements      = input_elements;
+                pipe_desc.input_element_count = 8;
+                pipe_desc.input_stride        = sizeof(SkinnedVertex);
+                pipe_desc.cull_mode           = culls[c];
+                pipe_desc.depth_enable        = true;
+                pipe_desc.depth_func          = CompareFunc::Less;
+                pipe_desc.rt_format           = Format::R8G8B8A8_UNORM;
+                pipe_desc.ds_format           = Format::D32_FLOAT;
+                pipe_desc.sampler_filter      = FilterMode::Linear;
+                pipe_desc.sampler_address     = address;
+                pipe_desc.blend_mode          = blends[b];
+                pipe_desc.bindings            = {4, 6};
+                block[c][b] = rhi.create_pipeline(pipe_desc);
+                if (!block[c][b].is_valid()) return false;
+            }
+        }
+        return true;
+    }
+
     bool create_pbr_resources() {
-        std::vector<u8> vs_bytecode = load_shader_bytecode("pbr_vs.cso");
-        std::vector<u8> ps_bytecode = load_shader_bytecode("pbr_ps.cso");
-        if (vs_bytecode.empty() || ps_bytecode.empty()) return false;
+        std::vector<u8> vs_bytecode         = load_shader_bytecode("pbr_vs.cso");
+        std::vector<u8> ps_bytecode         = load_shader_bytecode("pbr_ps.cso");
+        std::vector<u8> skinned_vs_bytecode = load_shader_bytecode("pbr_skinned_vs.cso");
+        if (vs_bytecode.empty() || ps_bytecode.empty() || skinned_vs_bytecode.empty())
+            return false;
 
         pbr_vs = rhi.create_shader({vs_bytecode.data(), static_cast<u32>(vs_bytecode.size())});
         pbr_ps = rhi.create_shader({ps_bytecode.data(), static_cast<u32>(ps_bytecode.size())});
-        if (!pbr_vs.is_valid() || !pbr_ps.is_valid()) return false;
+        pbr_skinned_vs = rhi.create_shader(
+            {skinned_vs_bytecode.data(), static_cast<u32>(skinned_vs_bytecode.size())});
+        if (!pbr_vs.is_valid() || !pbr_ps.is_valid() || !pbr_skinned_vs.is_valid()) return false;
 
         // Default 1×1 textures for missing PBR maps
         const u8 white_px[4]  = {255, 255, 255, 255};
@@ -595,24 +681,36 @@ static void shadow_pass_execute(RhiDevice& rhi, void* user_data) {
 
     const f32 sz = static_cast<f32>(kShadowMapSize);
 
-    rhi.set_pipeline(impl->shadow_pipeline);
-    rhi.set_constant_buffer(0, impl->ring.buffers[fi], shadow_cb_offset);
     rhi.set_viewport(0, 0, sz, sz, 0, 1);
     rhi.set_scissor(0, 0, kShadowMapSize, kShadowMapSize);
 
-    ModelId bound_model = kInvalidModelId;
+    // Static and skinned items use different pipelines (and root signatures,
+    // which invalidate root arguments on switch — rebind b0 then).
+    ModelId        bound_model = kInvalidModelId;
+    PipelineHandle bound_pso{};
     for (const DrawItem& item : impl->draw_list) {
         const LoadedModel& lm = impl->models[item.model_id];
+        const Mesh& mesh = lm.model.mesh;
+        const bool skinned_draw = mesh.skinned && item.palette_cb_offset != kNoPalette;
+
+        const PipelineHandle pso = skinned_draw ? impl->shadow_skinned_pipeline
+                                                : impl->shadow_pipeline;
+        if (pso != bound_pso) {
+            rhi.set_pipeline(pso);
+            rhi.set_constant_buffer(0, impl->ring.buffers[fi], shadow_cb_offset);
+            bound_pso = pso;
+        }
 
         if (item.model_id != bound_model) {
-            rhi.set_vertex_buffer(lm.model.mesh.vertex_buffer, lm.model.mesh.vertex_stride);
-            rhi.set_index_buffer(lm.model.mesh.index_buffer, Format::R32_UINT);
+            rhi.set_vertex_buffer(mesh.vertex_buffer, mesh.vertex_stride);
+            rhi.set_index_buffer(mesh.index_buffer, Format::R32_UINT);
             bound_model = item.model_id;
         }
 
         rhi.set_constant_buffer(1, impl->ring.buffers[fi], item.object_cb_offset);
+        if (skinned_draw)
+            rhi.set_constant_buffer(2, impl->ring.buffers[fi], item.palette_cb_offset);
 
-        const Mesh& mesh = lm.model.mesh;
         for (u32 si = 0; si < mesh.sub_mesh_count; ++si) {
             const SubMesh& sub = mesh.sub_meshes[si];
             rhi.draw_indexed(sub.index_count, sub.index_offset, sub.base_vertex);
@@ -701,8 +799,13 @@ static void pbr_pass_execute(RhiDevice& rhi, void* user_data) {
             bound_model = item.model_id;
         }
 
-        const PipelineHandle pso =
-            impl->pbr_pso(lm.model.sampler_address, mat.double_sided, blend);
+        // Skinned draws use the skinned PSO block ({4,6}: palette CBV at b3,
+        // SRV table slots shifted +1); a skinned mesh submitted without a
+        // palette falls back to the static PSO and draws its bind pose.
+        const bool skinned_draw = mesh.skinned && item.palette_cb_offset != kNoPalette;
+        const PipelineHandle pso = skinned_draw
+            ? impl->pbr_skinned_pso(lm.model.sampler_address, mat.double_sided, blend)
+            : impl->pbr_pso(lm.model.sampler_address, mat.double_sided, blend);
         if (pso != bound_pso) {
             rhi.set_pipeline(pso);
             bound_pso = pso;
@@ -713,18 +816,21 @@ static void pbr_pass_execute(RhiDevice& rhi, void* user_data) {
         rhi.set_constant_buffer(0, impl->ring.buffers[fi], frame_cb_offset);
         rhi.set_constant_buffer(1, impl->ring.buffers[fi], item.object_cb_offset);
         rhi.set_constant_buffer(2, lm.material_cbs[mat_idx]);
+        if (skinned_draw)
+            rhi.set_constant_buffer(3, impl->ring.buffers[fi], item.palette_cb_offset);
 
-        rhi.set_texture(3, mat.has_albedo_texture
-                           ? mat.albedo_texture : impl->default_white_tex);
-        rhi.set_texture(4, mat.has_metallic_roughness_texture
-                           ? mat.metallic_roughness_texture : impl->default_white_tex);
-        rhi.set_texture(5, mat.has_normal_texture
-                           ? mat.normal_texture : impl->default_normal_tex);
-        rhi.set_texture(6, mat.has_occlusion_texture
-                           ? mat.occlusion_texture : impl->default_white_tex);
-        rhi.set_texture(7, mat.has_emissive_texture
-                           ? mat.emissive_texture : impl->default_white_tex);
-        rhi.set_texture(8, impl->has_shadows ? impl->shadow_map : impl->default_white_tex);
+        const u32 t0 = skinned_draw ? 4 : 3; // first SRV slot follows the CBVs
+        rhi.set_texture(t0 + 0, mat.has_albedo_texture
+                                ? mat.albedo_texture : impl->default_white_tex);
+        rhi.set_texture(t0 + 1, mat.has_metallic_roughness_texture
+                                ? mat.metallic_roughness_texture : impl->default_white_tex);
+        rhi.set_texture(t0 + 2, mat.has_normal_texture
+                                ? mat.normal_texture : impl->default_normal_tex);
+        rhi.set_texture(t0 + 3, mat.has_occlusion_texture
+                                ? mat.occlusion_texture : impl->default_white_tex);
+        rhi.set_texture(t0 + 4, mat.has_emissive_texture
+                                ? mat.emissive_texture : impl->default_white_tex);
+        rhi.set_texture(t0 + 5, impl->has_shadows ? impl->shadow_map : impl->default_white_tex);
 
         rhi.draw_indexed(sub.index_count, sub.index_offset, sub.base_vertex);
     };
@@ -828,6 +934,12 @@ ModelId Renderer::load_model(const char* path, ge::Allocator alloc) {
         return kInvalidModelId;
     }
 
+    if (lm.model.mesh.skinned && !impl->ensure_pbr_skinned_psos(lm.model.sampler_address)) {
+        GE_ERROR("load_model: failed to build skinned PBR PSOs for the model's sampler mode");
+        destroy_model(lm.model, impl->rhi);
+        return kInvalidModelId;
+    }
+
     if (!impl->create_material_cbs(lm)) {
         GE_ERROR("load_model: failed to create per-material constant buffers");
         impl->destroy_material_cbs(lm);
@@ -856,7 +968,28 @@ void Renderer::submit(ModelId id, const mat4& transform) {
     GE_ASSERT(id < kMaxModels && impl->models[id].in_use); // invalid or unloaded ModelId
     if (id >= kMaxModels || !impl->models[id].in_use) return;
 
-    impl->draw_list.push_back({id, transform, 0});
+    impl->draw_list.push_back({id, transform, 0, kNoPalette});
+}
+
+void Renderer::submit_skinned(ModelId id, const mat4& transform, const mat4* palette,
+                              std::uint32_t joint_count) {
+    auto* impl = static_cast<RendererImpl*>(impl_);
+    GE_ASSERT(id < kMaxModels && impl->models[id].in_use); // invalid or unloaded ModelId
+    if (id >= kMaxModels || !impl->models[id].in_use) return;
+    GE_ASSERT(impl->models[id].model.mesh.skinned); // submit_skinned on a static model
+    GE_ASSERT(palette != nullptr && joint_count > 0 && joint_count <= kMaxPaletteJoints);
+
+    // Copy the palette into this frame's upload ring now — the caller may
+    // reuse its array immediately. Both the shadow and PBR skinned passes
+    // bind this one allocation.
+    u32 palette_offset = kNoPalette;
+    const u32 fi = impl->rhi.frame_index();
+    if (void* mapped = impl->ring.alloc(fi, joint_count * sizeof(mat4), palette_offset))
+        std::memcpy(mapped, palette, joint_count * sizeof(mat4));
+    else
+        palette_offset = kNoPalette; // ring exhausted (logged): fall back to bind pose
+
+    impl->draw_list.push_back({id, transform, 0, palette_offset});
 }
 
 void Renderer::set_camera(const Camera& cam) {

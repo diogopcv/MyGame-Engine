@@ -95,6 +95,7 @@ static DXGI_FORMAT to_dxgi_format(Format fmt) {
     switch (fmt) {
         case Format::R8G8B8A8_UNORM:      return DXGI_FORMAT_R8G8B8A8_UNORM;
         case Format::R8G8B8A8_UNORM_SRGB: return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+        case Format::R8G8B8A8_UINT:       return DXGI_FORMAT_R8G8B8A8_UINT;
         case Format::R32G32_FLOAT:        return DXGI_FORMAT_R32G32_FLOAT;
         case Format::R32G32B32_FLOAT:     return DXGI_FORMAT_R32G32B32_FLOAT;
         case Format::R32G32B32A32_FLOAT:  return DXGI_FORMAT_R32G32B32A32_FLOAT;

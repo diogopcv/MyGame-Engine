@@ -35,6 +35,9 @@ using ModelId = std::uint32_t;
 /** @brief Sentinel for "no model" / failed load. */
 inline constexpr ModelId kInvalidModelId = ~ModelId(0);
 
+/** @brief Maximum joints in a submit_skinned() palette (matches the skinned shaders' cbuffer). */
+inline constexpr std::uint32_t kMaxPaletteJoints = 256;
+
 /**
  * @brief Descriptor for initialising the renderer.
  */
@@ -88,6 +91,28 @@ public:
      * @param transform Model-to-world matrix for this instance.
      */
     void submit(ModelId id, const mat4& transform);
+
+    /**
+     * @brief Submit one instance of a skinned model with its bone palette.
+     *
+     * The palette (model-space × inverse-bind matrices, e.g. from
+     * `ge_anim::pose_to_palette` — passed as bare `mat4*` per the sibling-
+     * isolation contract) is copied into the per-frame upload ring
+     * immediately, so the caller may reuse the array after this returns.
+     * The same allocation feeds both the shadow and PBR skinned passes.
+     * `transform` applies the entity's world transform on top of the
+     * palette, exactly like a static submit().
+     *
+     * Submitting a skinned model through plain submit() instead is valid
+     * and draws its bind pose.
+     *
+     * @param id          Model returned by load_model(); must be skinned.
+     * @param transform   Model-to-world matrix for this instance.
+     * @param palette     joint_count palette matrices, glTF skin joint order.
+     * @param joint_count Number of palette entries (max kMaxPaletteJoints).
+     */
+    void submit_skinned(ModelId id, const mat4& transform, const mat4* palette,
+                        std::uint32_t joint_count);
 
     /** @brief Set the active camera for rendering. Copied each frame. */
     void set_camera(const Camera& cam);
