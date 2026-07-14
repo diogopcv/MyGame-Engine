@@ -25,7 +25,7 @@ MyEngine is a game engine written from scratch in C++20, targeting Windows with 
 
 2. **Everything is built in layers with strict dependency rules.** A module can only depend on layers strictly below it. This single rule prevents the architectural decay that plagues most large C++ codebases.
 
-The engine is developed in phases, each building on the last. Phases 0-5 are complete:
+The engine is developed in phases, each building on the last. Phases 0-6 are implemented (Phase 6 pending only its manual blend-feel sign-off):
 
 | Phase | Name | What it delivered |
 |-------|------|-------------------|
@@ -35,8 +35,9 @@ The engine is developed in phases, each building on the last. Phases 0-5 are com
 | 3 | Renderer Proper | RHI abstraction, render graph, mesh/material/texture, model loading, camera, PBR (Cook-Torrance) + Blinn-Phong lighting, shadow mapping, transparency |
 | 4 | World & Gameplay | Sparse-set ECS (`ge_world`), `Scene` (roster + save/load), `ge_input` action/axis mapping, a fixed-update movement system driving a controllable entity |
 | 5 | Physics from Scratch | Hand-written rigid-body physics (`ge_physics`): collision/GJK, broadphase, contact manifolds, sequential-impulse solver, integration, a physics-driven capsule character |
+| 6 | Animation | Skeletal animation (`ge_anim`): clip sampling, pose blending, a crossfading state machine, root motion; GPU skinning in `ge_gfx`; a skinned character riding the physics capsule |
 
-See [08-ecs-and-world.md](08-ecs-and-world.md) for Phase 4 and [09-physics-engine.md](09-physics-engine.md) for Phase 5.
+See [08-ecs-and-world.md](08-ecs-and-world.md) for Phase 4, [09-physics-engine.md](09-physics-engine.md) for Phase 5, and [10-animation-system.md](10-animation-system.md) for Phase 6.
 
 ---
 
@@ -56,7 +57,7 @@ Layer 0: Platform            window, timer, virtual memory, file I/O
 ```
 
 Bold face below marks what exists today; everything else in each layer (audio,
-animation, AI, the asset system, gameplay/UI) is still on the roadmap.
+AI, the asset system, gameplay/UI) is still on the roadmap.
 
 ### Currently Implemented Modules
 
@@ -67,15 +68,19 @@ animation, AI, the asset system, gameplay/UI) is still on the roadmap.
 | `engine/gfx/` | 3 | Graphics subsystem: DX12 RHI, render graph, mesh/material, camera, PBR lighting, shadows, multi-model draw submission (ADR-0010) |
 | `engine/input/` | 3 | `InputMap`: named action/axis bindings on top of `platform::KeyCode` |
 | `engine/physics/` | 3 | Hand-written rigid-body physics: shapes/collision/GJK, broadphase, manifolds, solver, `PhysicsWorld` |
+| `engine/anim/` | 3 | Skeletal animation: skeleton/pose/clip sampling, glTF animation import, blending, state machine, root motion |
 | `engine/world/` | 4 | Sparse-set ECS (`World`, `ComponentPool<T>`), `Scene` (roster + save/load) |
 | `sandbox/` | 5 | Application test bed |
 
-Three modules share Layer 3 (`gfx`, `input`, `physics`) — they are siblings and
-never depend on each other, per the strict-layering rule. `world` (Layer 4)
-depends on `core` only, deliberately staying independent of all three Layer-3
-subsystems; the sandbox is the one place that wires them together (see
-[08-ecs-and-world.md](08-ecs-and-world.md) and
-[09-physics-engine.md](09-physics-engine.md) for why).
+Four modules share Layer 3 (`gfx`, `input`, `physics`, `anim`) — they are
+siblings and never depend on each other, per the strict-layering rule. `world`
+(Layer 4) depends on `core` only, deliberately staying independent of the
+Layer-3 subsystems; the sandbox is the one place that wires them together
+(see [08-ecs-and-world.md](08-ecs-and-world.md),
+[09-physics-engine.md](09-physics-engine.md), and
+[10-animation-system.md](10-animation-system.md) for why — the last is the
+clearest example: `ge_anim` produces bone palettes, `ge_gfx` consumes them,
+and the two meet only as a bare `mat4*` passed through the sandbox).
 
 ### Dependency Graph
 
@@ -94,6 +99,10 @@ sandbox (Layer 5)
   |     |
   |     +-- ge_core (Layer 1)
   |     +-- ge_platform (Layer 0)      (for platform::KeyCode)
+  |
+  +-- ge_anim (Layer 3)
+  |     |
+  |     +-- ge_core (Layer 1)
   |
   +-- ge_gfx (Layer 3)
   |     |

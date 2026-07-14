@@ -1,6 +1,6 @@
 # MyEngine Documentation
 
-Comprehensive documentation and study material for the MyEngine game engine, covering the implementation completed in Phases 0-5 plus the pre-Phase-6 renderer architecture hardening (ADR-0010). Each document is self-contained and explains not only what was implemented, but the underlying concepts, algorithms, and design decisions.
+Comprehensive documentation and study material for the MyEngine game engine, covering the implementation completed in Phases 0-6 plus the renderer architecture hardening (ADR-0010). Each document is self-contained and explains not only what was implemented, but the underlying concepts, algorithms, and design decisions.
 
 > **Upkeep rule:** these documents describe the engine *as it currently is*.
 > When a change lands that invalidates something here (an API, a pipeline, a
@@ -24,6 +24,7 @@ The documents are numbered to suggest a reading order, starting from the high-le
 | 07 | [Application and Game Loop](07-application-and-game-loop.md) | Sandbox application, fixed-timestep loop, frame lifecycle, `Scene`/`PhysicsWorld` hand-off, input handling, startup/shutdown sequences |
 | 08 | [ECS and World](08-ecs-and-world.md) | Sparse-set ECS, generational `Entity` handles, `ComponentPool<T>`, `World` queries, `Scene` (roster/names/save-load), `ge_input` action/axis mapping, the plain-C++-systems model |
 | 09 | [Physics Engine](09-physics-engine.md) | Collision shapes, narrowphase (SAT, GJK, closest-point methods), sweep-and-prune broadphase, contact manifold generation (clipping), the sequential-impulse solver, integration, the physics-driven character controller |
+| 10 | [Animation System](10-animation-system.md) | Skeletal animation fundamentals (joints, bind pose, inverse bind matrices, linear blend skinning), `ge_anim` (skeleton/pose/clip sampling, glTF animation import, 1D locomotion blend, crossfading state machine, root motion), the GPU-skinning render path (`SkinnedVertex`, palette root CBV, `submit_skinned`), sibling isolation with `ge_gfx`, feeding root motion to the physics character |
 
 ## Prerequisites
 
@@ -35,7 +36,7 @@ No prior knowledge of graphics programming, game engines, or Windows APIs is ass
 
 ## Scope
 
-This documentation covers Phases 0-5 of the engine:
+This documentation covers Phases 0-6 of the engine:
 
 - **Phase 0 (Foundation):** Platform layer, core types, logging, arena allocator, math library
 - **Phase 1 (First Triangle):** DX12 device/swapchain initialization, shader compilation, vertex buffers, spinning textured cube
@@ -43,3 +44,4 @@ This documentation covers Phases 0-5 of the engine:
 - **Phase 3 (Renderer Proper):** RHI abstraction, render graph, mesh/material/texture, glTF import, camera, PBR + Blinn-Phong forward lighting, shadow mapping, transparency
 - **Phase 4 (World & Gameplay):** Sparse-set ECS, `Scene` (roster/names/save-load), `ge_input` action/axis mapping, plain-C++ gameplay systems
 - **Phase 5 (Physics from Scratch):** Collision/GJK, broadphase, contact manifolds, sequential-impulse solver, integration, ECS-facing rigidbody glue, physics-driven character controller
+- **Phase 6 (Animation):** `ge_anim` skeletal animation (skeleton/pose/clip sampling, glTF import, blending, state machine, root motion), GPU skinning in `ge_gfx`, and the sandbox character glue feeding root motion to the physics capsule
