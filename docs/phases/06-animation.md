@@ -1,10 +1,11 @@
 # Phase 6 — Animation
 
-> Status: **In progress — code complete.** Expanded 2026-07-09. Milestones 1
+> Status: **Complete.** Expanded 2026-07-09. Milestones 1
 > (animation core + sampling math), 2 (glTF import + test assets), 3 (GPU
 > skinning render path), 4 (blending + state machine), and 5 (root motion)
-> complete 2026-07-14. Remaining for phase DoD: the manual blend-feel review
-> (idle↔walk↔run under real input) and sign-off.
+> complete 2026-07-14. Manual blend-feel review (idle↔walk↔run under real
+> input in the sandbox) passed and phase signed off 2026-07-14; all 8 CTest
+> suites green.
 > Note: the skinned *shadow* palette is bound at **b2** with
 > `BindingLayout{3,2}` (the depth-only root signature has no PerMaterial
 > slot), not b3 as sketched below — same ring allocation, different slot.

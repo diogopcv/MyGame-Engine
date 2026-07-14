@@ -91,7 +91,10 @@ Subsystems (Layer 3)
       solver + integration (`PhysicsWorld::step()`), sphere/box/capsule
       rigidbody shapes
 - [ ] Audio
-- [ ] Animation
+- [x] Animation: `ge_anim` — skeleton/clip import from glTF, clip sampling
+      + looping, pose blending (1D locomotion blend), animation state
+      machine with crossfades, GPU skinning (via `ge_gfx` skinned path),
+      root-motion extraction feeding the physics character (IK deferred)
 - [ ] Networking / multiplayer
 - [ ] AI
 
@@ -809,6 +812,10 @@ lost, but they do not block any phase above.
   rest-pose case. Full CTest suite (now 8 executables) green; 0 warnings
   at `/W4 /permissive-`; sandbox verified live (Fox 24 joints/3 clips,
   ~120 FPS, capsule at 0.89, clean exit).
-- Current: Phase 6 — Animation, all 5 milestones code complete. Remaining
-  for phase DoD: manual blend-feel review (idle↔walk↔run crossfades under
-  real input) and sign-off. See `docs/phases/06-animation.md`.
+- 2026-07-14 Phase 6 **complete**: manual blend-feel review passed
+  (idle↔walk↔run crossfades under real W/S+Shift input in the sandbox,
+  reviewed and signed off by Diogo) and all 8 CTest suites green on the
+  final run. Phase DoD met — skinned character plays and smoothly blends
+  locomotion clips driven by gameplay state.
+- Current: Phase 6 done. Next: Phase 7 — Audio
+  (`docs/phases/07-audio.md`, still a stub — expand before coding).

@@ -221,33 +221,29 @@ Run before claiming a task done, and report the answers:
 7. When something is ambiguous or would violate a rule, ask or flag — don't guess.
 8. When the deliverable is done (tests green by the definition above), update statuses: the phase-doc header, the `plan.md` Status log, and the module checklist.
 
-## Current Phase: Phase 6 — Animation
+## Current Phase: Phase 7 — Audio
 
-Phase 5 is **complete**: hand-written rigid-body physics (`ge_physics`,
-Layer 3, depends only on `ge_core`). Collision primitives (`Sphere`, `Box`,
-`Capsule`) with narrowphase (`sphere_sphere`/`sphere_box`/`box_box` SAT/
-`capsule_box`) and a support-function GJK distance query for the general
-convex case; sweep-and-prune broadphase; contact manifold generation
-(Sutherland-Hodgman face clipping + edge-edge closest points, up to 4 points
-per pair); a sequential-impulse velocity solver (Baumgarte position
-correction, box-approximated Coulomb friction) plus semi-implicit Euler
-integration, wired end-to-end as `PhysicsWorld::step(dt)`. ECS-facing glue:
-`world::RigidBodyRef` (a bare opaque body-id handle — `ge_world` still has
-zero dependency on `ge_physics`) plus sandbox-hosted sync systems, mirroring
-where `system_move_player` already lived in Phase 4. The sandbox's player is
-now a rotation-locked capsule rigid body, driven by yaw-relative input
-velocity, falling under gravity and resting on a static ground box — a
-physics-driven, controllable character. 54 physics unit/baseline tests,
-including simulation-baseline settling tests for a box stack and the
-character capsule (Phase 5's DoD scenarios).
+Phase 6 is **complete** (signed off 2026-07-14): skeletal animation as
+`ge_anim` (Layer 3, depends only on `ge_core` — sibling-isolated from
+`ge_gfx`, which owns the GPU-skinning render path). Skeleton/skinned-mesh/
+clip import from glTF (skins, joints, inverse bind matrices, animation
+channels); clip sampling with looping; pose blending (two-pose blend + 1D
+locomotion blend over a speed parameter); an animation state machine with
+crossfade transitions (idle/walk/run); GPU skinning via a bone-palette
+vertex shader path fed from the per-frame upload ring; root-motion
+extraction (`extract_root_motion`/`strip_root_motion`) feeding the Phase 5
+physics capsule — physics stays the authority over motion. The sandbox's
+player is the skinned Fox blending locomotion clips driven by W/S+Shift
+input. 27 anim test cases plus app-layer `sandbox_tests` root-motion
+baselines (the one place a test links sibling subsystems); IK deferred.
+Reference manual: `docs/documentation/10-animation-system.md`.
 
-Phase 6 goal: skeletal animation with GPU skinning, clip sampling/looping,
-blend trees, animation state machines, root motion (IK later).
+Phase 7 goal: audio — mixing graph, 3D spatialization and distance
+attenuation, streaming vs in-memory sounds, buses/groups (master/SFX/
+music), basic DSP (volume, pitch, reverb send).
 
-See `docs/phases/06-animation.md` for design details (expanded 2026-07-09:
-module layout for the new `ge_anim` Layer 3 module, sibling-isolation
-contract with `ge_gfx`, GPU-skinning tech decisions, 5 milestones, test
-plan).
+`docs/phases/07-audio.md` is still a stub — **expand it first** (scope,
+tech decisions, design, milestones, test plan) before writing Phase 7 code.
 
 ## Golden Rules (Never Violate)
 
