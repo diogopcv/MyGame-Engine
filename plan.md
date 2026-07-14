@@ -203,7 +203,8 @@ done, regardless of how complete the feature looks.
 - Detail: [`docs/phases/07-audio.md`](docs/phases/07-audio.md)
 - Mixing graph; 3D spatialization and distance attenuation; streaming vs
   in-memory sounds; buses/groups (master / SFX / music); basic DSP (volume,
-  pitch, reverb send). Backend from scratch (WASAPI) or via miniaudio.
+  pitch, reverb send). Backend: WASAPI from scratch (decided 2026-07-14 at
+  doc expansion; stb_vorbis vendored for OGG decode only — see phase doc).
 - DoD: positional sound effects and music play in the scene, attenuated by
   distance and routed through separate buses.
 
@@ -817,5 +818,14 @@ lost, but they do not block any phase above.
   reviewed and signed off by Diogo) and all 8 CTest suites green on the
   final run. Phase DoD met — skinned character plays and smoothly blends
   locomotion clips driven by gameplay state.
+- 2026-07-14 All remaining phase design docs expanded. Phase 7
+  (`07-audio.md`) expanded on schedule — backend decided: **WASAPI from
+  scratch** (mixer/spatialization/DSP hand-written; stb_vorbis vendored for
+  OGG decode only; ADR-0011 to be recorded when Milestone 1 lands). Phases
+  8–14 pre-expanded **ahead of schedule** at Diogo's request, deliberately
+  overriding the template's just-in-time rule — each of those docs carries
+  a header note requiring re-validation of scope and tech decisions when
+  its phase actually begins; treat them as informed sketches, not settled
+  designs.
 - Current: Phase 6 done. Next: Phase 7 — Audio
-  (`docs/phases/07-audio.md`, still a stub — expand before coding).
+  (`docs/phases/07-audio.md`, expanded 2026-07-14 — ready to code).

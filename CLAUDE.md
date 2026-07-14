@@ -242,8 +242,16 @@ Phase 7 goal: audio — mixing graph, 3D spatialization and distance
 attenuation, streaming vs in-memory sounds, buses/groups (master/SFX/
 music), basic DSP (volume, pitch, reverb send).
 
-`docs/phases/07-audio.md` is still a stub — **expand it first** (scope,
-tech decisions, design, milestones, test plan) before writing Phase 7 code.
+`docs/phases/07-audio.md` was expanded 2026-07-14 — **follow it**. Backend
+decision: WASAPI from scratch (mixer/spatialization/DSP hand-written;
+stb_vorbis vendored for OGG decode only); record ADR-0011 when Milestone 1
+lands.
+
+Note: phase docs 08–14 were pre-expanded ahead of schedule on 2026-07-14
+(user request, deliberately overriding the just-in-time rule). Each carries
+a header note: re-validate its scope and tech decisions against the actual
+codebase before starting that phase — treat them as informed sketches, not
+settled designs.
 
 ## Golden Rules (Never Violate)
 
