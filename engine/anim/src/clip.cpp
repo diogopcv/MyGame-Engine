@@ -78,7 +78,10 @@ u32 find_key(const f32* times, u32 key_count, f32 t) {
     return lo;
 }
 
-vec3 sample_vec3(const Vec3Track& track, f32 t) {
+} // namespace
+
+vec3 sample_track(const Vec3Track& track, f32 t) {
+    GE_ASSERT(track.key_count > 0);
     if (track.key_count == 1 || t <= track.times[0]) return track.values[0];
     u32 last = track.key_count - 1;
     if (t >= track.times[last]) return track.values[last];
@@ -87,7 +90,8 @@ vec3 sample_vec3(const Vec3Track& track, f32 t) {
     return lerp(track.values[i], track.values[i + 1], u);
 }
 
-quat sample_quat(const QuatTrack& track, f32 t) {
+quat sample_track(const QuatTrack& track, f32 t) {
+    GE_ASSERT(track.key_count > 0);
     if (track.key_count == 1 || t <= track.times[0]) return track.values[0];
     u32 last = track.key_count - 1;
     if (t >= track.times[last]) return track.values[last];
@@ -95,8 +99,6 @@ quat sample_quat(const QuatTrack& track, f32 t) {
     f32 u = (t - track.times[i]) / (track.times[i + 1] - track.times[i]);
     return slerp(track.values[i], track.values[i + 1], u);
 }
-
-} // namespace
 
 void sample(const AnimationClip& clip, const Skeleton& skel, f32 time, bool looping,
             Pose& out_pose) {
@@ -115,9 +117,9 @@ void sample(const AnimationClip& clip, const Skeleton& skel, f32 time, bool loop
         const JointTracks& tr = clip.tracks[i];
         JointPose& out = out_pose.joints[i];
         out = skel.rest_pose[i];
-        if (tr.translation.key_count > 0) out.translation = sample_vec3(tr.translation, t);
-        if (tr.rotation.key_count > 0)    out.rotation    = sample_quat(tr.rotation, t);
-        if (tr.scale.key_count > 0)       out.scale       = sample_vec3(tr.scale, t);
+        if (tr.translation.key_count > 0) out.translation = sample_track(tr.translation, t);
+        if (tr.rotation.key_count > 0)    out.rotation    = sample_track(tr.rotation, t);
+        if (tr.scale.key_count > 0)       out.scale       = sample_track(tr.scale, t);
     }
 }
 

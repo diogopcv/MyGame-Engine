@@ -17,6 +17,7 @@
 #include "physics/rigidbody.h"
 #include "anim/animation_loader.h"
 #include "anim/pose.h"
+#include "anim/root_motion.h"
 #include "anim/state_machine.h"
 
 #include <filesystem>
@@ -339,6 +340,14 @@ int main() {
                     fox_sm.transition_to(fox_state_idle, kFadeTime);
 
                 fox_sm.tick(static_cast<f32>(fixed_dt), speed, fox_pose);
+                // Milestone 5: strip root motion before building the palette,
+                // per the phase doc's tick pipeline. The Fox's clips are
+                // authored in place (their only translation track is the hip
+                // bob — the root joint has no tracks), so this is a no-op for
+                // this asset and the capsule keeps its input-driven velocity;
+                // the extract -> velocity feed is exercised by sandbox_tests'
+                // root-motion baseline with the authored "move" clip.
+                anim::strip_root_motion(fox_anim.skeleton, fox_pose);
                 anim::pose_to_model_space(fox_anim.skeleton, fox_pose, fox_model_space);
                 anim::pose_to_palette(fox_anim.skeleton, fox_model_space, fox_palette);
             }

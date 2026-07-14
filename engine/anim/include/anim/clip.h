@@ -69,6 +69,19 @@ private:
 };
 
 /**
+ * @brief Sample a single vec3 track at @p t (no looping — the caller wraps time).
+ *
+ * Times before the first key clamp to the first value, after the last key to
+ * the last value; between keys, linear interpolation. The track must not be
+ * empty. Used by sample() per channel and by root-motion extraction, which
+ * samples just the root joint's tracks (see root_motion.h).
+ */
+vec3 sample_track(const Vec3Track& track, f32 t);
+
+/** @brief Quaternion-track overload of sample_track(): slerp between keys, clamped ends. */
+quat sample_track(const QuatTrack& track, f32 t);
+
+/**
  * @brief Sample @p clip at @p time into @p out_pose.
  *
  * Looping wraps time by the clip duration; non-looping clamps to

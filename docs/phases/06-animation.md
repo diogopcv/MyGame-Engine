@@ -1,12 +1,19 @@
 # Phase 6 — Animation
 
-> Status: **In progress.** Expanded 2026-07-09. Milestones 1 (animation core +
-> sampling math), 2 (glTF import + test assets), 3 (GPU skinning render
-> path), and 4 (blending + state machine) complete 2026-07-14; Milestone 5
-> (root motion) next.
+> Status: **In progress — code complete.** Expanded 2026-07-09. Milestones 1
+> (animation core + sampling math), 2 (glTF import + test assets), 3 (GPU
+> skinning render path), 4 (blending + state machine), and 5 (root motion)
+> complete 2026-07-14. Remaining for phase DoD: the manual blend-feel review
+> (idle↔walk↔run under real input) and sign-off.
 > Note: the skinned *shadow* palette is bound at **b2** with
 > `BindingLayout{3,2}` (the depth-only root signature has no PerMaterial
 > slot), not b3 as sketched below — same ring allocation, different slot.
+> Note (Milestone 5): the Fox's clips turned out to be authored **in place**
+> (their only translation channel is the hip bob; the root joint has no
+> tracks), so the live sandbox keeps its input-driven velocity and the
+> root-motion → capsule feed is exercised by the app-layer `sandbox_tests`
+> baselines using the generated strip's authored "move" clip instead —
+> same capsule + ground-box setup as the sandbox player.
 
 ## Goal
 Skeletal animation with GPU skinning: clip sampling and looping, pose

@@ -772,5 +772,43 @@ lost, but they do not block any phase above.
   sandbox verified live (Fox idles in Survey at rest, ~120 FPS, clean
   exit). Manual blend-feel review (idle<->walk<->run under real input)
   rolls into Milestone 5's phase-DoD sign-off.
-- Current: Phase 6 — Animation, Milestone 5 (root motion) next. See
-  `docs/phases/06-animation.md`.
+- 2026-07-14 Phase 6 Milestone 5 done: root motion. New
+  `anim/root_motion.h/.cpp`: `RootMotionDelta` (horizontal translation +
+  yaw, asset model space — the consumer rotates/scales it into world) and
+  `extract_root_motion(clip, skel, prev_time, new_time, looping)`, which
+  samples the root (joint 0) tracks at both tick ends and differences them;
+  looping uses an unwrapped-position formula (P(t) = floor(t/d)·per-cycle +
+  S(t mod d)), so seam-crossing and multi-loop ticks yield the exact
+  travelled delta, never the snap-back. Yaw is the root rotation's +Y twist
+  (half-angle atan2(q.y, q.w) — scale-invariant, no normalize), with the
+  through-360° wrap documented as a non-defended limitation until a real
+  turning asset exists. `strip_root_motion(skel, pose)` is the exact
+  complement: root x/z and yaw twist reset to the *rest* values (not zero —
+  in-place clips strip to a no-op), animated vertical + swing + children
+  untouched, via q·q_y(rest_yaw − anim_yaw) on the swing∗twist
+  decomposition. `sample_track()` (vec3/quat) promoted from clip.cpp's
+  internals to the public clip.h API for the root-track sampling. Asset
+  discovery that shaped the milestone: the Fox's three clips are authored
+  **in place** — their only translation channel is the hip bob (node
+  b_Hip_01); the root joint has no tracks — so the sandbox keeps its
+  input-driven capsule velocity, adds the strip call to the fixed-tick
+  pipeline (a documented no-op for this asset), and the extract → velocity
+  feed is proven headlessly instead: new app-layer `sandbox/tests`
+  executable (`sandbox_tests`, the one place a test links sibling
+  subsystems ge_anim + ge_physics, mirroring the sandbox glue it verifies).
+  Baselines there (deterministic, fixed step): the Phase 5 capsule on the
+  ground box driven per-tick by the strip's authored "move" clip
+  (2 u/s) lands within 0.05 of the analytic 8-unit travel after 4 s while
+  still resting at y≈0.89 under gravity; a wall in the path stops it at
+  x≈3.0 despite the animation still feeding forward velocity — physics
+  stays the authority, root motion never teleports the body. 6 new unit
+  tests (anim suite now 27 cases / 487 assertions): exact per-tick deltas
+  with vertical excluded, seam + whole-loop unwrap, non-looping clamps,
+  yaw twist extraction incl. across the seam, strip preserving
+  vertical/swing/children while zeroing x/z + yaw, and the in-place/
+  rest-pose case. Full CTest suite (now 8 executables) green; 0 warnings
+  at `/W4 /permissive-`; sandbox verified live (Fox 24 joints/3 clips,
+  ~120 FPS, capsule at 0.89, clean exit).
+- Current: Phase 6 — Animation, all 5 milestones code complete. Remaining
+  for phase DoD: manual blend-feel review (idle↔walk↔run crossfades under
+  real input) and sign-off. See `docs/phases/06-animation.md`.

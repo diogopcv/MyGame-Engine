@@ -10,3 +10,5 @@
 
 add_executable(sandbox src/main.cpp)
 target_link_libraries(sandbox PRIVATE ge_core ge_gfx ge_input ge_world ge_physics ge_anim)
+
+add_subdirectory(tests)

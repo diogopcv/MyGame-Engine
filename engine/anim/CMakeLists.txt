@@ -8,6 +8,7 @@ add_library(ge_anim STATIC
     src/clip.cpp
     src/animation_loader.cpp
     src/state_machine.cpp
+    src/root_motion.cpp
 )
 
 target_include_directories(ge_anim PUBLIC include)
