@@ -1,7 +1,8 @@
 # Phase 6 — Animation
 
 > Status: **In progress.** Expanded 2026-07-09. Milestone 1 (animation core +
-> sampling math) complete 2026-07-14; Milestone 2 next.
+> sampling math) and Milestone 2 (glTF import + test assets) complete
+> 2026-07-14; Milestone 3 (GPU skinning render path) next.
 
 ## Goal
 Skeletal animation with GPU skinning: clip sampling and looping, pose

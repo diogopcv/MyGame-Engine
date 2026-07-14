@@ -97,6 +97,7 @@ struct MeshInstance {
     const cgltf_mesh* mesh = nullptr;
     mat4 world{};         ///< Object→world (row-vector convention).
     mat4 normal_world{};  ///< transpose(inverse(world)) for normals/tangents.
+    bool skinned = false; ///< Node has a skin: transform is NOT baked (glTF ignores it).
 };
 
 /// cgltf writes world transforms as a column-major float[16]. Copying element
@@ -114,12 +115,20 @@ static void gather_instances(const cgltf_data* data, std::vector<MeshInstance>& 
     for (cgltf_size ni = 0; ni < data->nodes_count; ++ni) {
         const cgltf_node& node = data->nodes[ni];
         if (!node.mesh) continue;
-        float wm[16];
-        cgltf_node_transform_world(&node, wm);
         MeshInstance inst{};
-        inst.mesh        = node.mesh;
-        inst.world       = column_major_to_row_vector(wm);
-        inst.normal_world = transpose(inverse(inst.world));
+        inst.mesh = node.mesh;
+        if (node.skin) {
+            // Skinned: the bone palette positions the vertices; per glTF the
+            // node's own transform is ignored, so nothing is baked.
+            inst.skinned      = true;
+            inst.world        = mat4_identity();
+            inst.normal_world = mat4_identity();
+        } else {
+            float wm[16];
+            cgltf_node_transform_world(&node, wm);
+            inst.world        = column_major_to_row_vector(wm);
+            inst.normal_world = transpose(inverse(inst.world));
+        }
         out.push_back(inst);
     }
     // Fallback: no node references a mesh — bake every mesh at identity.
@@ -148,7 +157,8 @@ static vec3 transform_dir(vec3 v, const mat4& m) {
 // Loader
 // ---------------------------------------------------------------------------
 
-bool load_model_gltf(const char* path, RhiDevice& rhi, Allocator alloc, Model& out) {
+bool load_model_gltf(const char* path, RhiDevice& rhi, Allocator alloc, Model& out,
+                     ModelCpu* cpu_out) {
     cgltf_options options{};
     cgltf_data* data = nullptr;
 
@@ -302,6 +312,16 @@ bool load_model_gltf(const char* path, RhiDevice& rhi, Allocator alloc, Model& o
     out.mesh.sub_meshes = alloc.alloc_n<SubMesh>(total_prims);
     out.mesh.sub_mesh_count = total_prims;
 
+    // Skinning attributes, parallel to `vertices` (interleaved into
+    // SkinnedVertex after the loop iff any primitive is skinned). Defaults:
+    // joint 0 at full weight, so unskinned primitives in a skinned model
+    // still deform rigidly with the root instead of reading garbage.
+    bool model_skinned  = false;
+    bool joint_overflow = false;
+    std::vector<u8>  sk_joints(static_cast<usize>(total_vertices) * 4, 0);
+    std::vector<f32> sk_weights(static_cast<usize>(total_vertices) * 4, 0.0f);
+    for (u32 vi = 0; vi < total_vertices; ++vi) sk_weights[vi * 4] = 1.0f;
+
     u32 vert_offset  = 0;
     u32 index_offset = 0;
     u32 prim_index   = 0;
@@ -315,6 +335,8 @@ bool load_model_gltf(const char* path, RhiDevice& rhi, Allocator alloc, Model& o
             bool has_normals  = false;
             bool has_tangents = false;
             bool has_uv0      = false;
+            bool has_joints   = false;
+            bool has_weights  = false;
 
             for (cgltf_size ai = 0; ai < prim.attributes_count; ++ai) {
                 const cgltf_attribute& attr = prim.attributes[ai];
@@ -361,6 +383,25 @@ bool load_model_gltf(const char* path, RhiDevice& rhi, Allocator alloc, Model& o
                         vertices[vert_offset + vi].color[1] = c[1];
                         vertices[vert_offset + vi].color[2] = c[2];
                         vertices[vert_offset + vi].color[3] = c[3];
+                    }
+                } else if (attr.type == cgltf_attribute_type_joints && attr.index == 0) {
+                    has_joints = true;
+                    for (cgltf_size vi = 0; vi < acc->count; ++vi) {
+                        cgltf_uint j[4] = {};
+                        cgltf_accessor_read_uint(acc, vi, j, 4);
+                        for (int c = 0; c < 4; ++c) {
+                            if (j[c] > 255) joint_overflow = true; // u8 palette indices
+                            sk_joints[(static_cast<usize>(vert_offset) + vi) * 4 + c] =
+                                static_cast<u8>(j[c]);
+                        }
+                    }
+                } else if (attr.type == cgltf_attribute_type_weights && attr.index == 0) {
+                    has_weights = true;
+                    for (cgltf_size vi = 0; vi < acc->count; ++vi) {
+                        f32 w[4] = {};
+                        cgltf_accessor_read_float(acc, vi, w, 4);
+                        for (int c = 0; c < 4; ++c)
+                            sk_weights[(static_cast<usize>(vert_offset) + vi) * 4 + c] = w[c];
                     }
                 } else if (attr.type == cgltf_attribute_type_tangent) {
                     has_tangents = true;
@@ -469,19 +510,30 @@ bool load_model_gltf(const char* path, RhiDevice& rhi, Allocator alloc, Model& o
                 }
             }
 
+            if (inst.skinned) {
+                if (has_joints && has_weights) model_skinned = true;
+                else GE_WARN("Skinned node primitive missing JOINTS_0/WEIGHTS_0 in {}; "
+                             "rigidly bound to joint 0", path);
+            }
+
             // --- Bake the node world transform into the vertices ---
+            //     (skinned meshes stay in bind space: the palette places them)
             vec3 centroid_accum{0, 0, 0};
             for (u32 vi = 0; vi < vert_count; ++vi) {
                 LitVertex& v = vertices[vert_offset + vi];
-                vec3 p = transform_point(vec3{v.position[0], v.position[1], v.position[2]}, inst.world);
-                v.position[0] = p.x; v.position[1] = p.y; v.position[2] = p.z;
-                centroid_accum.x += p.x; centroid_accum.y += p.y; centroid_accum.z += p.z;
+                if (!inst.skinned) {
+                    vec3 p = transform_point(vec3{v.position[0], v.position[1], v.position[2]}, inst.world);
+                    v.position[0] = p.x; v.position[1] = p.y; v.position[2] = p.z;
 
-                vec3 n = normalize(transform_dir(vec3{v.normal[0], v.normal[1], v.normal[2]}, inst.normal_world));
-                v.normal[0] = n.x; v.normal[1] = n.y; v.normal[2] = n.z;
+                    vec3 n = normalize(transform_dir(vec3{v.normal[0], v.normal[1], v.normal[2]}, inst.normal_world));
+                    v.normal[0] = n.x; v.normal[1] = n.y; v.normal[2] = n.z;
 
-                vec3 t = normalize(transform_dir(vec3{v.tangent[0], v.tangent[1], v.tangent[2]}, inst.world));
-                v.tangent[0] = t.x; v.tangent[1] = t.y; v.tangent[2] = t.z; // w (sign) unchanged
+                    vec3 t = normalize(transform_dir(vec3{v.tangent[0], v.tangent[1], v.tangent[2]}, inst.world));
+                    v.tangent[0] = t.x; v.tangent[1] = t.y; v.tangent[2] = t.z; // w (sign) unchanged
+                }
+                centroid_accum.x += v.position[0];
+                centroid_accum.y += v.position[1];
+                centroid_accum.z += v.position[2];
             }
 
             SubMesh& sub = out.mesh.sub_meshes[prim_index];
@@ -505,13 +557,36 @@ bool load_model_gltf(const char* path, RhiDevice& rhi, Allocator alloc, Model& o
 
     cgltf_free(data);
 
+    if (joint_overflow) {
+        GE_ERROR("Skin joint index > 255 in {} (u8 palette indices, see gfx/mesh.h)", path);
+        return false;
+    }
+
+    // --- Interleave SkinnedVertex when any primitive is skinned ---
+    std::vector<SkinnedVertex> skinned_vertices;
+    if (model_skinned) {
+        skinned_vertices.resize(total_vertices);
+        for (u32 vi = 0; vi < total_vertices; ++vi) {
+            SkinnedVertex& sv = skinned_vertices[vi];
+            sv.base = vertices[vi];
+            for (int c = 0; c < 4; ++c) {
+                sv.joints[c]  = sk_joints[static_cast<usize>(vi) * 4 + c];
+                sv.weights[c] = sk_weights[static_cast<usize>(vi) * 4 + c];
+            }
+        }
+    }
+    const u32 vertex_stride = model_skinned ? sizeof(SkinnedVertex) : sizeof(LitVertex);
+    const void* vertex_data = model_skinned
+                              ? static_cast<const void*>(skinned_vertices.data())
+                              : static_cast<const void*>(vertices.data());
+
     // --- Create GPU buffers (default heap: static geometry lives in VRAM,
     //     uploaded once through the RHI's staging path) ---
     BufferDesc vb_desc{};
-    vb_desc.size         = total_vertices * sizeof(LitVertex);
+    vb_desc.size         = total_vertices * vertex_stride;
     vb_desc.usage        = BufferUsage::Vertex;
     vb_desc.cpu_visible  = false;
-    vb_desc.initial_data = vertices.data();
+    vb_desc.initial_data = vertex_data;
     out.mesh.vertex_buffer = rhi.create_buffer(vb_desc);
 
     BufferDesc ib_desc{};
@@ -523,16 +598,35 @@ bool load_model_gltf(const char* path, RhiDevice& rhi, Allocator alloc, Model& o
 
     out.mesh.vertex_count  = total_vertices;
     out.mesh.index_count   = total_indices;
-    out.mesh.vertex_stride = sizeof(LitVertex);
+    out.mesh.vertex_stride = vertex_stride;
+    out.mesh.skinned       = model_skinned;
+
+    // --- Optional CPU-side copy for tests/tooling ---
+    if (cpu_out) {
+        *cpu_out = {};
+        cpu_out->vertex_count = total_vertices;
+        cpu_out->index_count  = total_indices;
+        cpu_out->indices = alloc.alloc_n<u32>(total_indices);
+        std::memcpy(cpu_out->indices, indices.data(), total_indices * sizeof(u32));
+        if (model_skinned) {
+            cpu_out->skinned_vertices = alloc.alloc_n<SkinnedVertex>(total_vertices);
+            std::memcpy(cpu_out->skinned_vertices, skinned_vertices.data(),
+                        total_vertices * sizeof(SkinnedVertex));
+        } else {
+            cpu_out->vertices = alloc.alloc_n<LitVertex>(total_vertices);
+            std::memcpy(cpu_out->vertices, vertices.data(),
+                        total_vertices * sizeof(LitVertex));
+        }
+    }
 
     if (!out.mesh.vertex_buffer.is_valid() || !out.mesh.index_buffer.is_valid()) {
         GE_ERROR("Failed to create GPU buffers for: {}", path);
         return false;
     }
 
-    GE_INFO("Loaded model: {} ({} verts, {} indices, {} submeshes, {} materials, transparency={})",
+    GE_INFO("Loaded model: {} ({} verts, {} indices, {} submeshes, {} materials, transparency={}, skinned={})",
             path, total_vertices, total_indices, total_prims, out.material_count,
-            out.has_transparency ? 1 : 0);
+            out.has_transparency ? 1 : 0, out.mesh.skinned ? 1 : 0);
     return true;
 }
 

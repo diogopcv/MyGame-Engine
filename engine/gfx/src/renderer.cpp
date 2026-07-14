@@ -605,7 +605,7 @@ static void shadow_pass_execute(RhiDevice& rhi, void* user_data) {
         const LoadedModel& lm = impl->models[item.model_id];
 
         if (item.model_id != bound_model) {
-            rhi.set_vertex_buffer(lm.model.mesh.vertex_buffer, sizeof(LitVertex));
+            rhi.set_vertex_buffer(lm.model.mesh.vertex_buffer, lm.model.mesh.vertex_stride);
             rhi.set_index_buffer(lm.model.mesh.index_buffer, Format::R32_UINT);
             bound_model = item.model_id;
         }
@@ -696,7 +696,7 @@ static void pbr_pass_execute(RhiDevice& rhi, void* user_data) {
         const bool blend = (mat.alpha_mode == AlphaMode::Blend);
 
         if (item.model_id != bound_model) {
-            rhi.set_vertex_buffer(mesh.vertex_buffer, sizeof(LitVertex));
+            rhi.set_vertex_buffer(mesh.vertex_buffer, mesh.vertex_stride);
             rhi.set_index_buffer(mesh.index_buffer, Format::R32_UINT);
             bound_model = item.model_id;
         }

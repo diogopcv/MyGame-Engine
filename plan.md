@@ -675,5 +675,39 @@ lost, but they do not block any phase above.
   local→model→palette incl. the rest-pose⇒identity-palette round trip and
   skinning bind-pose vertices to hand-derived animated positions. Full CTest
   suite (7 executables) green, 0 warnings at `/W4 /permissive-`.
-- Current: Phase 6 — Animation, Milestone 2 (glTF import + test assets)
+- 2026-07-14 Phase 6 Milestone 2 done: glTF import + test assets.
+  `ge_anim` side — new `animation_loader.h/.cpp` (cgltf linked PRIVATE, per
+  the third-party wrapping rule): `AnimationSet` (Skeleton + clips + a
+  clip-name table with `find_clip()`), `load_animation_gltf()` imports skin
+  0's joint hierarchy (validating the parents-precede-children invariant
+  `pose_to_model_space` relies on, and the <=256-joint cap), rest pose from
+  joint-node TRS (matrix nodes decomposed), IBMs converted column-major →
+  row-vector (same transpose-copy as the gfx loader), and every animation's
+  translation/rotation/scale channels into SoA tracks (LINEAR; STEP read as
+  linear; CUBICSPLINE skipped with a warning; morph weights out of scope).
+  `ge_gfx` side — `SkinnedVertex` (LitVertex prefix + u8 joints[4] +
+  f32 weights[4], stride 92, static_assert'd): the prefix keeps static-path
+  attribute offsets valid so non-skinned pipelines can draw a skinned buffer
+  (bind pose) with the larger stride. Loader reads JOINTS_0/WEIGHTS_0
+  (u8/u16 via read_uint, >255 rejected), skips node-transform baking for
+  skinned nodes (per glTF the skinned node's transform is ignored — the test
+  asset carries a deliberate translation(5,0,0) to catch regressions),
+  interleaves and uploads SkinnedVertex when any primitive is skinned;
+  `Mesh::skinned` + `vertex_stride` now drive the renderer's vertex binding
+  (two hardcoded `sizeof(LitVertex)` strides fixed). New optional `ModelCpu`
+  out-param returns the merged CPU-side vertex/index copy for tests/tooling
+  without a GPU readback. Assets — new `tools/gen_skinned_glb.cpp`
+  (deterministic 2-bone strip: 3 weight rows, IBMs, "bend" 90°-about-Z
+  rotation clip + "move" (0,0,0)→(2,0,0) root-translation clip for
+  Milestone 5); vendored Khronos Fox.glb (CC-BY 4.0, same situation as
+  DamagedHelmet; verified parents-first joints + Survey/Walk/Run clips).
+  Tests — anim: strip import round-trip against the generator's exact
+  values (parents/rest/IBMs/key times+values), end-to-end sample→palette
+  skinning a bind vertex to the hand-computed (-1,1,0), no-skin file
+  rejected, Fox sanity (3 clips by name, unit rotations across all joints);
+  gfx: strip SkinnedVertex joints/weights/bind-positions exact, box.glb
+  still LitVertex, Fox skinned with normalized weights. 15 anim cases (440
+  assertions) + 2 new gfx cases; full CTest suite (7 executables) green
+  incl. the unchanged golden cube, 0 warnings at `/W4 /permissive-`.
+- Current: Phase 6 — Animation, Milestone 3 (GPU skinning render path)
   next. See `docs/phases/06-animation.md`.

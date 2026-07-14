@@ -30,14 +30,40 @@ struct Model {
 };
 
 /**
+ * @brief Optional CPU-side copy of the merged vertex/index data.
+ *
+ * Filled by load_model_gltf() when requested — used by tests (asserting what
+ * the importer produced without a GPU readback) and future offline tooling.
+ * Arrays are allocated from the same allocator passed to the loader; the
+ * caller owns them (arena callers simply reset).  Exactly one of
+ * `vertices` / `skinned_vertices` is non-null, matching `Mesh::skinned`.
+ */
+struct ModelCpu {
+    LitVertex*     vertices         = nullptr; ///< When the model is not skinned.
+    SkinnedVertex* skinned_vertices = nullptr; ///< When the model is skinned.
+    u32*           indices          = nullptr;
+    u32            vertex_count     = 0;
+    u32            index_count      = 0;
+};
+
+/**
  * @brief Load a glTF / GLB model from disk.
- * @param path  File path to the .gltf or .glb file.
- * @param rhi   RHI device used to create GPU resources.
- * @param alloc Allocator for CPU-side arrays (sub-meshes, materials, textures).
- * @param out   Receives the loaded model on success.
+ *
+ * Meshes with JOINTS_0/WEIGHTS_0 attributes load as skinned
+ * (`SkinnedVertex`, `Mesh::skinned = true`); their node transforms are
+ * **not** baked into vertices (per glTF, a skinned node's transform is
+ * ignored — the bone palette positions them). Static meshes keep the
+ * Phase 3 node-baking behavior.
+ *
+ * @param path    File path to the .gltf or .glb file.
+ * @param rhi     RHI device used to create GPU resources.
+ * @param alloc   Allocator for CPU-side arrays (sub-meshes, materials, textures).
+ * @param out     Receives the loaded model on success.
+ * @param cpu_out Optional: receives a CPU-side copy of the vertex/index data.
  * @return true on success, false on parse/load error.
  */
-bool load_model_gltf(const char* path, RhiDevice& rhi, Allocator alloc, Model& out);
+bool load_model_gltf(const char* path, RhiDevice& rhi, Allocator alloc, Model& out,
+                     ModelCpu* cpu_out = nullptr);
 
 /**
  * @brief Destroy a model's GPU resources and free CPU-side memory.
